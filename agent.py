@@ -23,8 +23,10 @@ from config import (
     TTS_PACE,
     TTS_TEMPERATURE,
     TTS_OUTPUT_BITRATE,
+    TTS_OUTPUT_AUDIO_CODEC,
     TTS_MIN_BUFFER_SIZE,
     TTS_MAX_CHUNK_LENGTH,
+    TTS_WS_MAX_RETRIES,
     MIN_ENDPOINTING_DELAY,
 )
 from utils.prompts import SYSTEM_PROMPT, GREETING_INSTRUCTIONS
@@ -85,18 +87,47 @@ class MultilingualTTS(tts.TTS):
                 pace=TTS_PACE,
                 temperature=TTS_TEMPERATURE,
                 output_audio_bitrate=TTS_OUTPUT_BITRATE,
+                output_audio_codec=TTS_OUTPUT_AUDIO_CODEC,
                 min_buffer_size=TTS_MIN_BUFFER_SIZE,
                 max_chunk_length=TTS_MAX_CHUNK_LENGTH,
             )
         return self._tts_instances[language_code]
 
+    async def _invalidate_tts(self, language_code: str) -> None:
+        """Close and remove a stale TTS instance so the next call creates a fresh one."""
+        async with self._lock:
+            instance = self._tts_instances.pop(language_code, None)
+        if instance:
+            logger.warning(f"Invalidating stale TTS instance for {language_code}")
+            await instance.aclose()
+
     async def synthesize(self, *, text: str, conn_options=None) -> tts.ChunkedStream:
-        tts_instance = self._get_or_create_tts(self._current_language)
-        return await tts_instance.synthesize(text=text, conn_options=conn_options)
+        last_exc = None
+        for attempt in range(TTS_WS_MAX_RETRIES + 1):
+            tts_instance = self._get_or_create_tts(self._current_language)
+            try:
+                return await tts_instance.synthesize(text=text, conn_options=conn_options)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"TTS synthesize attempt {attempt + 1} failed: {exc}")
+                await self._invalidate_tts(self._current_language)
+        raise last_exc  # type: ignore[misc]
 
     def stream(self, *, conn_options=None) -> tts.SynthesizeStream:
-        tts_instance = self._get_or_create_tts(self._current_language)
-        return tts_instance.stream(conn_options=conn_options)
+        last_exc = None
+        for attempt in range(TTS_WS_MAX_RETRIES + 1):
+            tts_instance = self._get_or_create_tts(self._current_language)
+            try:
+                return tts_instance.stream(conn_options=conn_options)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"TTS stream attempt {attempt + 1} failed: {exc}")
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._invalidate_tts(self._current_language))
+                except RuntimeError:
+                    self._tts_instances.pop(self._current_language, None)
+        raise last_exc  # type: ignore[misc]
 
     async def update_options(
         self,
@@ -110,7 +141,9 @@ class MultilingualTTS(tts.TTS):
             self.current_language = target_language_code
         async with self._lock:
             tts_instance = self._get_or_create_tts(self._current_language)
-            kwargs = {}
+            kwargs: dict = {}
+            if target_language_code:
+                kwargs["target_language_code"] = target_language_code
             if speaker:
                 kwargs["speaker"] = speaker
             if pace is not None:

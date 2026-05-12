@@ -39,8 +39,10 @@ TTS_SAMPLE_RATE = 24000
 TTS_PACE = 1.0
 TTS_TEMPERATURE = 0.6
 TTS_OUTPUT_BITRATE = "128k"
+TTS_OUTPUT_AUDIO_CODEC = "mp3"  # "wav" is broken: Sarvam returns raw PCM, not a WAV container
 TTS_MIN_BUFFER_SIZE = 50
 TTS_MAX_CHUNK_LENGTH = 150
+TTS_WS_MAX_RETRIES = 2  # stale WebSocket recovery attempts
 
 # LLM
 LLM_MODEL = "sarvam-30b"  # or "sarvam-30b" for lower latency

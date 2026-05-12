@@ -175,3 +175,6 @@ SARVAM_API_KEY=sk_xxxxxxxxxxxxxxxxxxxxxxxx
 - **React + Vite frontend** — componentized SPA, `livekit-client` as npm dep, fast HMR in dev, optimized production build
 - **Text-based emotion** — Sarvam lacks SSML; the LLM conveys emotion through word choice and Indian interjections
 - **Data messages to frontend** — agent publishes `{type: "transcript", role, text, language}` via LiveKit data channel for chat bubbles and language highlighting
+- **Explicit mp3 codec** — `output_audio_codec="mp3"` set explicitly; `"wav"` is blocked because Sarvam returns raw PCM bytes instead of a valid WAV container, causing LiveKit decode crashes
+- **Stale WebSocket retry** — `synthesize()` and `stream()` retry up to `TTS_WS_MAX_RETRIES` times on failure, invalidating stale TTS instances so the next attempt creates a fresh WebSocket connection
+- **`target_language_code` propagation** — `update_options()` passes `target_language_code` through to the underlying `sarvam.TTS.update_options()` so the internal opts stay consistent with the wrapper's language routing
