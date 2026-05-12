@@ -1,0 +1,8 @@
+That's a bug caused by unstable STT language detection. Here's what's happening:
+
+Sarvam STT runs with language="unknown" (auto-detect)
+In Indian conversations, users naturally code-switch (Hinglish, Tanglish, etc.) — Sarvam may detect "hi-IN" for one utterance and "en-IN" for the next
+Each time the detected language changes in agent.py:204-208, it switches the TTS instance — and since each language has a different tts_speaker, the voice flips
+So when a student says something in Hinglish, the voice might flip between simran (Hindi, female) and aditya (English, male) mid-conversation.
+
+Quickest fix: Lock the language after first detection so it doesn't keep switching. Want me to implement that, or would you prefer a different approach — like using the same speaker voice across all languages so switching is seamless?
