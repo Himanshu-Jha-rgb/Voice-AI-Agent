@@ -1,0 +1,14 @@
+[project]
+name = "voice-ai-agent"
+version = "0.1.0"
+description = "Multilingual Voice AI Agent for Indian Schools — powered by Sarvam AI + LiveKit"
+requires-python = ">=3.10"
+dependencies = [
+    "livekit-agents[sarvam,silero]>=1.5",
+    "livekit",
+    "fastapi",
+    "uvicorn[standard]",
+    "python-dotenv",
+    "numpy",
+    "langfuse>=2.0",
+]

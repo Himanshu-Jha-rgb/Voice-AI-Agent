@@ -1,0 +1,55 @@
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class LanguageConfig:
+    code: str  # BCP-47 language code
+    name: str  # Human-readable name
+    tts_speaker: str  # Default Sarvam Bulbul v3 speaker
+    region: str  # Indian region
+
+
+SUPPORTED_LANGUAGES: list[LanguageConfig] = [
+    LanguageConfig("hi-IN", "Hindi", "simran", "North"),
+    LanguageConfig("ta-IN", "Tamil", "kavitha", "South"),
+    LanguageConfig("te-IN", "Telugu", "rupali", "South"),
+    LanguageConfig("kn-IN", "Kannada", "neha", "South"),
+    LanguageConfig("ml-IN", "Malayalam", "priya", "South"),
+    LanguageConfig("mr-IN", "Marathi", "shreya", "West"),
+    LanguageConfig("gu-IN", "Gujarati", "pooja", "West"),
+    LanguageConfig("bn-IN", "Bengali", "ishita", "East"),
+    LanguageConfig("od-IN", "Odia", "suhani", "East"),
+    LanguageConfig("pa-IN", "Punjabi", "tanya", "North"),
+    LanguageConfig("en-IN", "English", "aditya", "Pan-India"),
+]
+
+LANGUAGE_CODE_MAP: dict[str, LanguageConfig] = {lang.code: lang for lang in SUPPORTED_LANGUAGES}
+DEFAULT_LANGUAGE = LANGUAGE_CODE_MAP["hi-IN"]
+
+# STT
+STT_MODEL = "saaras:v3"
+STT_MODE = "transcribe"
+STT_SAMPLE_RATE = 16000
+STT_HIGH_VAD_SENSITIVITY = True
+STT_FLUSH_SIGNAL = True
+
+# TTS
+TTS_MODEL = "bulbul:v3"
+TTS_SAMPLE_RATE = 24000
+TTS_PACE = 1.0
+TTS_TEMPERATURE = 0.6
+TTS_OUTPUT_BITRATE = "128k"
+TTS_MIN_BUFFER_SIZE = 50
+TTS_MAX_CHUNK_LENGTH = 150
+
+# LLM
+LLM_MODEL = "sarvam-30b"  # or "sarvam-30b" for lower latency
+
+# Turn detection
+MIN_ENDPOINTING_DELAY = 0.07  # 70ms
+MIN_SPEECH_DURATION = 0.05  # 50ms (enables fast barge-in)
+MAX_CONTEXT_ITEMS = 20  # conversation context window
+
+# Noisy environment — uncomment these and comment the above when background noise is present
+# MIN_ENDPOINTING_DELAY = 0.3   # 300ms
+# MIN_SPEECH_DURATION = 0.15    # 150ms

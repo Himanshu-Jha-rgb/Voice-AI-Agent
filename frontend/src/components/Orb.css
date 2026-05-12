@@ -1,0 +1,112 @@
+.orb-stage {
+  position: relative;
+  width: 140px;
+  height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.orb {
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  border: 2px solid var(--border);
+  transition: all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+  position: relative;
+  z-index: 1;
+}
+
+.orb-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  opacity: 0;
+  transition: all 0.6s ease;
+}
+
+/* Idle */
+.orb-stage.idle .orb {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  box-shadow: 0 0 0 0 transparent;
+}
+
+/* Listening */
+.orb-stage.listening .orb {
+  background: #1a1a2e;
+  border-color: rgba(59, 130, 246, 0.5);
+  box-shadow: 0 0 40px rgba(59, 130, 246, 0.18), 0 0 80px rgba(59, 130, 246, 0.06);
+}
+.orb-stage.listening .orb-ring {
+  opacity: 0.5;
+  border-color: rgba(59, 130, 246, 0.3);
+  animation: ring-pulse 1.5s ease-in-out infinite;
+}
+
+/* Thinking */
+.orb-stage.thinking .orb {
+  background: #1e1a2e;
+  border-color: rgba(139, 92, 246, 0.5);
+  box-shadow: 0 0 40px rgba(139, 92, 246, 0.18), 0 0 80px rgba(139, 92, 246, 0.06);
+  animation: orb-think 1.6s ease-in-out infinite;
+}
+.orb-stage.thinking .orb-ring {
+  opacity: 0.4;
+  border-color: rgba(139, 92, 246, 0.2);
+  animation: ring-spin 3s linear infinite;
+}
+
+/* Speaking */
+.orb-stage.speaking .orb {
+  background: #1a2e1a;
+  border-color: rgba(34, 197, 94, 0.5);
+  box-shadow: 0 0 40px rgba(34, 197, 94, 0.18), 0 0 80px rgba(34, 197, 94, 0.06);
+  animation: orb-breathe 1.2s ease-in-out infinite;
+}
+.orb-stage.speaking .orb-ring {
+  opacity: 0.6;
+  border-color: rgba(34, 197, 94, 0.25);
+  animation: ring-pulse 1s ease-in-out infinite;
+}
+
+/* Inner face */
+.orb-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  pointer-events: none;
+}
+.orb-face svg {
+  width: 52px;
+  height: 52px;
+  opacity: 0.35;
+  transition: opacity 0.3s;
+}
+.orb-stage.listening .orb-face svg,
+.orb-stage.speaking .orb-face svg,
+.orb-stage.thinking .orb-face svg {
+  opacity: 0.8;
+}
+
+@keyframes ring-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.3; }
+  50% { transform: scale(1.35); opacity: 0.05; }
+}
+@keyframes orb-think {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+@keyframes orb-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+@keyframes ring-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
