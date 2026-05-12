@@ -191,3 +191,4 @@ Voice-AI-Agent/
 - For noisy environments like crowded classrooms, swap `config.py` to the commented-out noisy values
 - Tools are stubs returning mock data — replace with real school database/SIS integrations
 # Voice-AI-Agent
+kala
