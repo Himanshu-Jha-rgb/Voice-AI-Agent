@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 
 
@@ -45,7 +46,9 @@ TTS_MAX_CHUNK_LENGTH = 150
 TTS_WS_MAX_RETRIES = 2  # stale WebSocket recovery attempts
 
 # LLM
-LLM_MODEL = "sarvam-30b"  # or "sarvam-30b" for lower latency
+LLM_MODEL = "sarvam-30b"  # Sarvam model name (only used when provider is "sarvam")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "sarvam")  # "sarvam" or "openai"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # OpenAI model (only used when provider is "openai")
 
 # Turn detection
 MIN_ENDPOINTING_DELAY = 0.07  # 70ms

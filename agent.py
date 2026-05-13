@@ -17,6 +17,8 @@ from config import (
     STT_MODE,
     STT_SAMPLE_RATE,
     LLM_MODEL,
+    LLM_PROVIDER,
+    OPENAI_MODEL,
     STT_HIGH_VAD_SENSITIVITY,
     STT_FLUSH_SIGNAL,
     TTS_MODEL,
@@ -173,6 +175,14 @@ class SchoolVoiceAgent(Agent):
     def __init__(self) -> None:
         self._multilingual_tts = MultilingualTTS(default_language_code="hi-IN")
 
+        if LLM_PROVIDER == "openai":
+            from livekit.plugins.openai import LLM as OpenAILLM
+            llm = OpenAILLM(model=OPENAI_MODEL)
+            logger.info(f"Using OpenAI LLM — model: {OPENAI_MODEL}")
+        else:
+            llm = sarvam.LLM(model=LLM_MODEL)
+            logger.info(f"Using Sarvam LLM — model: {LLM_MODEL}")
+
         super().__init__(
             instructions=SYSTEM_PROMPT,
             stt=sarvam.STT(
@@ -183,7 +193,7 @@ class SchoolVoiceAgent(Agent):
                 high_vad_sensitivity=STT_HIGH_VAD_SENSITIVITY,
                 flush_signal=STT_FLUSH_SIGNAL,
             ),
-            llm=sarvam.LLM(model=LLM_MODEL),
+            llm=llm,
             tts=self._multilingual_tts,
             tools=[
                 lookup_homework,
