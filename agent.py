@@ -171,6 +171,8 @@ class MultilingualTTS(tts.TTS):
 
 # Per-session storage for the last detected language (set from STT events)
 _detected_language: Optional[str] = None
+# Flag to detect multiple final transcripts in a single turn (VAD splitting)
+_final_seen_this_turn: bool = False
 
 
 class SchoolVoiceAgent(Agent):
@@ -211,21 +213,30 @@ class SchoolVoiceAgent(Agent):
         self.session.generate_reply(instructions=GREETING_INSTRUCTIONS)
 
     async def on_user_turn_completed(self, turn_ctx, *, new_message=None) -> None:
-        global _detected_language
+        global _detected_language, _final_seen_this_turn
         logger.info(f"Turn completed — detected language: {_detected_language}")
 
-        # Switch TTS language if needed
+        # Determine the target language for the next response
+        target_language = self._multilingual_tts.current_language
         if _detected_language and _detected_language in LANGUAGE_CODE_MAP:
+            target_language = _detected_language
             if _detected_language != self._multilingual_tts.current_language:
                 lang = LANGUAGE_CODE_MAP[_detected_language]
                 logger.info(f"Language switch: {self._multilingual_tts.current_language} → {_detected_language} ({lang.name})")
-                # Invalidate stale TTS instance before switching to avoid
-                # "Cannot write to closing transport" WebSocket race conditions
-                await self._multilingual_tts._invalidate_tts(_detected_language)
-                self._multilingual_tts.current_language = _detected_language
 
         # Reset for next turn
         _detected_language = None
+        _final_seen_this_turn = False
+
+        # Invalidate the old TTS instance so its stale WebSocket stops producing
+        # audio.  Otherwise the old stream and the new one play simultaneously
+        # (two voices).  We do this regardless of language switch because even a
+        # same-language turn creates a new WebSocket on the cached instance.
+        old_language = self._multilingual_tts.current_language
+        await self._multilingual_tts._invalidate_tts(old_language)
+
+        # Now switch to the target language (triggers fresh TTS creation on next stream())
+        self._multilingual_tts.current_language = target_language
 
         # Trim chat context to keep conversation focused
         items = self._chat_ctx.items
@@ -240,6 +251,8 @@ class SchoolVoiceAgent(Agent):
 async def entrypoint(ctx: JobContext) -> None:
     logger.info(f"User connected to room: {ctx.room.name}")
 
+    agent = SchoolVoiceAgent()
+
     session = AgentSession(
         vad=silero.VAD.load(),
         turn_handling=TurnHandlingOptions(
@@ -249,7 +262,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("user_input_transcribed")
     def _on_stt(ev):
-        global _detected_language
+        global _detected_language, _final_seen_this_turn
         transcript = getattr(ev, "transcript", "")
         language = getattr(ev, "language", None)
         is_final = getattr(ev, "is_final", False)
@@ -263,6 +276,19 @@ async def entrypoint(ctx: JobContext) -> None:
 
         # Send transcript to frontend
         if transcript and is_final:
+            # If the VAD split a single user utterance into multiple final
+            # transcripts, each triggers its own LLM response + TTS — two AI
+            # voices play simultaneously.  Interrupt the in-progress TTS so
+            # only the latest response reaches the user's ear.
+            if _final_seen_this_turn:
+                logger.warning(
+                    "Multiple final transcripts in one turn — interrupting TTS "
+                    "to prevent overlapping voices"
+                )
+                tts = agent._multilingual_tts
+                asyncio.create_task(tts._invalidate_tts(tts.current_language))
+            _final_seen_this_turn = True
+
             asyncio.create_task(
                 ctx.room.local_participant.publish_data(
                     payload=json.dumps({
@@ -315,7 +341,7 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.error(f"Agent session error: {ev}")
 
     await session.start(
-        agent=SchoolVoiceAgent(),
+        agent=agent,
         room=ctx.room,
     )
 
