@@ -4,6 +4,9 @@ import logging
 from typing import Optional
 
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from livekit.agents import JobContext, WorkerOptions, cli, tts
 from livekit.agents.llm import ChatContext
 from livekit.agents.voice import Agent, AgentSession
@@ -42,7 +45,6 @@ from utils.tools import (
     explain_with_example,
 )
 
-load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("school-voice-agent")
 logger.setLevel(logging.DEBUG)
