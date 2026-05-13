@@ -207,6 +207,9 @@ class SchoolVoiceAgent(Agent):
             if _detected_language != self._multilingual_tts.current_language:
                 lang = LANGUAGE_CODE_MAP[_detected_language]
                 logger.info(f"Language switch: {self._multilingual_tts.current_language} → {_detected_language} ({lang.name})")
+                # Invalidate stale TTS instance before switching to avoid
+                # "Cannot write to closing transport" WebSocket race conditions
+                await self._multilingual_tts._invalidate_tts(_detected_language)
                 self._multilingual_tts.current_language = _detected_language
 
         # Reset for next turn
