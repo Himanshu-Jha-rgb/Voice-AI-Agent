@@ -241,9 +241,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
         logger.debug(f"STT event — transcript: '{transcript}', language: {language}, is_final: {is_final}")
 
-        # Store language for TTS switching
+        # Store language for TTS switching (only first detection per turn wins)
         global _detected_language
-        if language:
+        if language and _detected_language is None:
             _detected_language = language
 
         # Send transcript to frontend
