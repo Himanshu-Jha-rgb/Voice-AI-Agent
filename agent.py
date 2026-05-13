@@ -165,7 +165,6 @@ class MultilingualTTS(tts.TTS):
 
 # Per-session storage for the last detected language (set from STT events)
 _detected_language: Optional[str] = None
-_language_locked: bool = False  # prevent voice flips from code-switching
 
 
 class SchoolVoiceAgent(Agent):
@@ -198,15 +197,15 @@ class SchoolVoiceAgent(Agent):
         self.session.generate_reply(instructions=GREETING_INSTRUCTIONS)
 
     async def on_user_turn_completed(self, turn_ctx, *, new_message=None) -> None:
-        global _detected_language, _language_locked
+        global _detected_language
         logger.info(f"Turn completed — detected language: {_detected_language}")
 
+        # Switch TTS language if needed
         if _detected_language and _detected_language in LANGUAGE_CODE_MAP:
-            if not _language_locked and _detected_language != self._multilingual_tts.current_language:
+            if _detected_language != self._multilingual_tts.current_language:
                 lang = LANGUAGE_CODE_MAP[_detected_language]
                 logger.info(f"Language switch: {self._multilingual_tts.current_language} → {_detected_language} ({lang.name})")
                 self._multilingual_tts.current_language = _detected_language
-            _language_locked = True
 
         # Reset for next turn
         _detected_language = None
@@ -293,9 +292,6 @@ async def entrypoint(ctx: JobContext) -> None:
         agent=SchoolVoiceAgent(),
         room=ctx.room,
     )
-
-    global _language_locked
-    _language_locked = False
 
 
 if __name__ == "__main__":

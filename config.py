@@ -10,17 +10,17 @@ class LanguageConfig:
 
 
 SUPPORTED_LANGUAGES: list[LanguageConfig] = [
-    LanguageConfig("hi-IN", "Hindi", "simran", "North"),
-    LanguageConfig("ta-IN", "Tamil", "kavitha", "South"),
-    LanguageConfig("te-IN", "Telugu", "rupali", "South"),
-    LanguageConfig("kn-IN", "Kannada", "neha", "South"),
+    LanguageConfig("hi-IN", "Hindi", "priya", "North"),
+    LanguageConfig("ta-IN", "Tamil", "priya", "South"),
+    LanguageConfig("te-IN", "Telugu", "priya", "South"),
+    LanguageConfig("kn-IN", "Kannada", "priya", "South"),
     LanguageConfig("ml-IN", "Malayalam", "priya", "South"),
-    LanguageConfig("mr-IN", "Marathi", "shreya", "West"),
-    LanguageConfig("gu-IN", "Gujarati", "pooja", "West"),
-    LanguageConfig("bn-IN", "Bengali", "ishita", "East"),
-    LanguageConfig("od-IN", "Odia", "suhani", "East"),
-    LanguageConfig("pa-IN", "Punjabi", "tanya", "North"),
-    LanguageConfig("en-IN", "English", "aditya", "Pan-India"),
+    LanguageConfig("mr-IN", "Marathi", "priya", "West"),
+    LanguageConfig("gu-IN", "Gujarati", "priya", "West"),
+    LanguageConfig("bn-IN", "Bengali", "priya", "East"),
+    LanguageConfig("od-IN", "Odia", "priya", "East"),
+    LanguageConfig("pa-IN", "Punjabi", "priya", "North"),
+    LanguageConfig("en-IN", "English", "priya", "Pan-India"),
 ]
 
 LANGUAGE_CODE_MAP: dict[str, LanguageConfig] = {lang.code: lang for lang in SUPPORTED_LANGUAGES}
