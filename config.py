@@ -50,7 +50,7 @@ LLM_MODEL = "sarvam-30b"  # or "sarvam-30b" for lower latency
 # Turn detection
 MIN_ENDPOINTING_DELAY = 0.07  # 70ms
 MIN_SPEECH_DURATION = 0.05  # 50ms (enables fast barge-in)
-MAX_CONTEXT_ITEMS = 20  # conversation context window
+MAX_CONTEXT_ITEMS = 50  # conversation context window
 
 # Noisy environment — uncomment these and comment the above when background noise is present
 # MIN_ENDPOINTING_DELAY = 0.3   # 300ms

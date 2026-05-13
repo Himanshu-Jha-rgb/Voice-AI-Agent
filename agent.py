@@ -5,6 +5,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from livekit.agents import JobContext, WorkerOptions, cli, tts
+from livekit.agents.llm import ChatContext
 from livekit.agents.voice import Agent, AgentSession
 from livekit.agents.voice.turn import TurnHandlingOptions, EndpointingOptions
 from livekit.plugins import sarvam, silero
@@ -28,6 +29,7 @@ from config import (
     TTS_MAX_CHUNK_LENGTH,
     TTS_WS_MAX_RETRIES,
     MIN_ENDPOINTING_DELAY,
+    MAX_CONTEXT_ITEMS,
 )
 from utils.prompts import SYSTEM_PROMPT, GREETING_INSTRUCTIONS
 from utils.tools import (
@@ -209,6 +211,15 @@ class SchoolVoiceAgent(Agent):
 
         # Reset for next turn
         _detected_language = None
+
+        # Trim chat context to keep conversation focused
+        items = self._chat_ctx.items
+        if len(items) > MAX_CONTEXT_ITEMS:
+            before = len(items)
+            # Keep system prompt (index 0) + last (MAX_CONTEXT_ITEMS - 1) items
+            trimmed = [items[0]] + items[-(MAX_CONTEXT_ITEMS - 1):]
+            await self.update_chat_ctx(ChatContext(trimmed))
+            logger.info(f"Trimmed chat context: {before} → {len(trimmed)} items")
 
 
 async def entrypoint(ctx: JobContext) -> None:
