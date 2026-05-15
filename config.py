@@ -45,7 +45,7 @@ TTS_OUTPUT_BITRATE = "128k"
 TTS_OUTPUT_AUDIO_CODEC = (
     "mp3"  # "wav" is broken: Sarvam returns raw PCM, not a WAV container
 )
-TTS_MIN_BUFFER_SIZE = 50
+TTS_MIN_BUFFER_SIZE = 20  # chars before TTS starts — aggressive for fast first audio (was 50)
 TTS_MAX_CHUNK_LENGTH = 150
 TTS_WS_MAX_RETRIES = 2  # stale WebSocket recovery attempts
 
@@ -61,9 +61,9 @@ OPENAI_MODEL = os.getenv(
 ENDPOINTING_MODE = "dynamic"  # "fixed" or "dynamic" — dynamic adapts to speaker cadence
 ENDPOINTING_MIN_DELAY = 0.05  # 50ms minimum silence before end-of-turn (was 70ms)
 ENDPOINTING_MAX_DELAY = (
-    0.25  # 250ms cap — aggressive for fast Indian-language turn-taking (was 500ms)
+    0.15  # 150ms cap — faster turn finalization (was 250ms)
 )
-ENDPOINTING_ALPHA = 0.7  # EMA coefficient — more responsive to current speech (was 0.8)
+ENDPOINTING_ALPHA = 0.6  # EMA coefficient — more responsive to current speech (was 0.7)
 
 # ── Preemptive generation ────────────────────────────────────────────────────
 PREEMPTIVE_GENERATION = True

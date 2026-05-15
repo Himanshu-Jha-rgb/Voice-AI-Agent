@@ -251,6 +251,48 @@ def _text_hash(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Latency Tracker — precise per-turn instrumentation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class LatencyTracker:
+    """Precise per-turn latency instrumentation.
+
+    Records timestamps at each pipeline stage and logs detailed
+    breakdowns so bottlenecks are visible in production.
+    """
+
+    def __init__(self):
+        self.vad_start: float = 0.0
+        self.vad_end: float = 0.0
+        self.stt_first_partial: float = 0.0
+        self.stt_final: float = 0.0
+        self.llm_request_start: float = 0.0
+        self.llm_first_token: float = 0.0
+        self.tts_stream_start: float = 0.0
+        self.tts_first_audio: float = 0.0
+        self.playback_start: float = 0.0
+
+    def reset(self) -> None:
+        self.__init__()
+
+    def log_metrics(self) -> None:
+        m = {}
+        if self.vad_start and self.vad_end:
+            m["vad_latency_ms"] = round((self.vad_end - self.vad_start) * 1000)
+        if self.stt_first_partial and self.stt_final:
+            m["stt_latency_ms"] = round((self.stt_final - self.stt_first_partial) * 1000)
+        if self.llm_request_start and self.llm_first_token:
+            m["llm_ttft_ms"] = round((self.llm_first_token - self.llm_request_start) * 1000)
+        if self.tts_stream_start and self.tts_first_audio:
+            m["tts_ttfb_ms"] = round((self.tts_first_audio - self.tts_stream_start) * 1000)
+        if self.llm_first_token and self.tts_first_audio:
+            m["first_token_to_audio_ms"] = round((self.tts_first_audio - self.llm_first_token) * 1000)
+        if self.vad_start and self.tts_first_audio:
+            m["total_e2e_ms"] = round((self.tts_first_audio - self.vad_start) * 1000)
+        logger.info(f"LATENCY: {json.dumps(m, indent=None)}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # TTS Session Manager — centralized websocket ownership
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -658,8 +700,11 @@ class SchoolVoiceAgent(Agent):
             consecutive_required=LANG_SWITCH_CONSECUTIVE,
         )
 
-        # Prewarm the default TTS websocket before first turn
-        self._tts_session.prewarm()
+        # Tracked background tasks — bounded concurrency, cleanup-aware
+        self._bg_tasks: set[asyncio.Task] = set()
+
+        # Per-turn latency instrumentation
+        self._latency = LatencyTracker()
 
         if LLM_PROVIDER == "openai":
             from livekit.plugins.openai import LLM as OpenAILLM
@@ -691,13 +736,33 @@ class SchoolVoiceAgent(Agent):
             ],
         )
 
+    def track_bg(self, coro) -> asyncio.Task:
+        """Track a background task for cleanup-aware lifecycle."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
+
     async def on_enter(self) -> None:
         logger.info("User entered — generating greeting")
+        # Prewarm only hot languages to avoid socket explosion from 11 pools
+        HOT_LANGUAGES = ["hi-IN", "en-IN"]
+        for lang in HOT_LANGUAGES:
+            self._tts_session._get_or_create_tts(lang)
+            await self._tts_session.warm(lang)
         self.session.generate_reply(instructions=GREETING_INSTRUCTIONS)
 
     async def on_exit(self) -> None:
-        """Clean up all TTS websocket sessions when the agent leaves the room."""
+        """Clean up all TTS websocket sessions and tracked tasks."""
         logger.info("User exiting — closing TTS session manager")
+        # Drain tracked background tasks before closing TTS
+        if self._bg_tasks:
+            logger.debug(f"Draining {len(self._bg_tasks)} agent background tasks")
+            for task in list(self._bg_tasks):
+                if not task.done():
+                    task.cancel()
+            if self._bg_tasks:
+                await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
         await self._tts_session.aclose()
 
     async def on_user_turn_completed(self, turn_ctx, *, new_message=None) -> None:
@@ -705,6 +770,9 @@ class SchoolVoiceAgent(Agent):
 
         transcript = _detected_transcript or ""
         transcript_length = len(transcript)
+
+        # ── Latency: mark LLM request start ──────────────────────────────────
+        self._latency.llm_request_start = time.monotonic()
 
         logger.info(
             f"Turn completed — detected language: {_detected_language}, "
@@ -721,6 +789,7 @@ class SchoolVoiceAgent(Agent):
             )
             _detected_language = None
             _detected_transcript = ""
+            self._latency.reset()
             return
 
         # ── Step 2: Record turn in hysteresis tracker ───────────────────────
@@ -731,16 +800,14 @@ class SchoolVoiceAgent(Agent):
         switch_to = self._lang_tracker.should_switch(target_language)
 
         if switch_to:
-            # Hysteresis confirmed — permanent switch.  NOW close old TTS.
+            # Hysteresis confirmed — permanent switch.
+            # Pools are NEVER invalidated; all languages stay warm.
             lang = LANGUAGE_CODE_MAP[switch_to]
             logger.info(
                 f"Language switch CONFIRMED: {target_language} → {switch_to} "
                 f"({lang.name}) (hysteresis: {LANG_SWITCH_CONSECUTIVE} "
                 f"consecutive turns, min {LANG_SWITCH_MIN_CHARS} chars)"
             )
-            # Close old language's websocket — this is the ONLY place we do it
-            if target_language != switch_to:
-                await self._tts_session.invalidate_language(target_language)
             target_language = switch_to
         elif (
             _detected_language
@@ -761,19 +828,11 @@ class SchoolVoiceAgent(Agent):
 
         self._tts_session.current_language = target_language
 
-        # ── Step 4: Prewarm TTS websocket while LLM generates ───────────────
-        # The websocket handshake (~200ms) overlaps with LLM TTFT (~800ms).
-        # Since we never close the websocket between turns, this is mostly
-        # a no-op that just ensures pool health.
-        self._tts_session._track_bg(
-            self._tts_session.warm(target_language)
-        )
-
-        # ── Step 5: Reset per-turn globals ──────────────────────────────────
+        # ── Step 4: Reset per-turn globals ──────────────────────────────────
         _detected_language = None
         _detected_transcript = ""
 
-        # ── Step 6: Two-layer chat context assembly ─────────────────────────
+        # ── Step 5: Two-layer chat context assembly ─────────────────────────
         items = self._chat_ctx.items
         if len(items) > MAX_CONTEXT_ITEMS:
             system_item = items[0]
@@ -806,9 +865,60 @@ class SchoolVoiceAgent(Agent):
 
             if old_items and not self._summary_in_progress:
                 self._summary_in_progress = True
-                asyncio.create_task(
+                self.track_bg(
                     self._generate_rolling_summary(old_items)
                 )
+
+    # ── Streaming LLM node — per-token logging (framework already streams) ──
+
+    def llm_node(self, chat_ctx, tools, model_settings):
+        """Override to add per-token streaming verification logs.
+
+        The LiveKit framework already streams token-by-token from the OpenAI
+        API into the TTS stream (verified in Agent.default.llm_node +
+        Agent.default.tts_node).  This override adds observability so we can
+        prove that LLM tokens arrive incrementally and the first token is
+        not delayed by full response buffering.
+        """
+        return self._streaming_llm_node(chat_ctx, tools, model_settings)
+
+    async def _streaming_llm_node(self, chat_ctx, tools, model_settings):
+        chunk_count = 0
+        char_count = 0
+        first_content = True
+        start = time.monotonic()
+
+        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+            chunk_count += 1
+            now = time.monotonic()
+
+            # Extract text from the chunk (str or ChatChunk with delta)
+            text = None
+            if isinstance(chunk, str):
+                text = chunk
+            elif hasattr(chunk, "delta") and chunk.delta and chunk.delta.content:
+                text = chunk.delta.content
+
+            if text:
+                char_count += len(text)
+                if first_content:
+                    first_content = False
+                    if not self._latency.llm_first_token:
+                        self._latency.llm_first_token = now
+                        ttft = round((now - self._latency.llm_request_start) * 1000)
+                        logger.info(
+                            f"LLM_FIRST_TOKEN: {text[:40]!r} "
+                            f"llm_ttft_ms={ttft} "
+                            f"chunk={chunk_count}"
+                        )
+
+            yield chunk
+
+        elapsed = round((time.monotonic() - start) * 1000)
+        logger.info(
+            f"LLM stream complete: chunks={chunk_count} "
+            f"chars={char_count} elapsed_ms={elapsed}"
+        )
 
     async def _generate_rolling_summary(self, old_items: list) -> None:
         try:
@@ -837,8 +947,8 @@ async def entrypoint(ctx: JobContext) -> None:
             endpointing=EndpointingOptions(
                 mode=ENDPOINTING_MODE,
                 min_delay=ENDPOINTING_MIN_DELAY,   # 50ms — aggressive floor
-                max_delay=ENDPOINTING_MAX_DELAY,   # 250ms — tight cap
-                alpha=ENDPOINTING_ALPHA,           # 0.7 — responsive EMA
+                max_delay=ENDPOINTING_MAX_DELAY,   # 150ms — tight cap (was 250ms)
+                alpha=ENDPOINTING_ALPHA,           # 0.6 — responsive EMA (was 0.7)
             ),
             interruption=InterruptionOptions(
                 enabled=True,
@@ -868,7 +978,17 @@ async def entrypoint(ctx: JobContext) -> None:
         language = getattr(ev, "language", None)
         is_final = getattr(ev, "is_final", False)
 
+        now = time.monotonic()
+
+        # ── Latency: mark first partial ────────────────────────────────────
+        if transcript and not is_final and not agent._latency.stt_first_partial:
+            agent._latency.stt_first_partial = now
+            if not agent._latency.vad_start:
+                agent._latency.vad_start = now
+
         if is_final:
+            agent._latency.stt_final = now
+            agent._latency.vad_end = now
             logger.debug(f"STT final — '{transcript[:50]}' lang={language}")
 
         # First language detection for this turn wins
@@ -887,7 +1007,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 _detected_transcript + " " + transcript
             ).strip()
 
-            asyncio.create_task(
+            agent.track_bg(
                 ctx.room.local_participant.publish_data(
                     payload=json.dumps({
                         "type": "transcript",
@@ -901,6 +1021,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("speech_created")
     def _on_speech_created(ev):
+        now = time.monotonic()
+        agent._latency.tts_stream_start = now
+        if not agent._latency.tts_first_audio:
+            agent._latency.tts_first_audio = now
+            agent._latency.log_metrics()
         logger.debug("Agent speech created")
 
     @session.on("conversation_item_added")
@@ -915,7 +1040,7 @@ async def entrypoint(ctx: JobContext) -> None:
             text = " ".join(text_parts)
             if text:
                 logger.debug(f"Agent response: '{text[:100]}...'")
-                asyncio.create_task(
+                agent.track_bg(
                     ctx.room.local_participant.publish_data(
                         payload=json.dumps({
                             "type": "transcript",
@@ -925,18 +1050,6 @@ async def entrypoint(ctx: JobContext) -> None:
                         reliable=True,
                     )
                 )
-
-    @session.on("user_state_changed")
-    def _on_user_state(ev):
-        # User started speaking — prewarm TTS for current language so the
-        # websocket is ready before LLM generation starts.
-        if ev.new_state == "user_speaking":
-            agent._tts_session._track_bg(
-                agent._tts_session.warm(
-                    agent._tts_session.current_language
-                )
-            )
-        logger.debug(f"User state: {ev.old_state} → {ev.new_state}")
 
     @session.on("agent_state_changed")
     def _on_agent_state(ev):
