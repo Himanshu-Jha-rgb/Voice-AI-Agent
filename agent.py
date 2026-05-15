@@ -485,6 +485,18 @@ class RaceFreeSynthesizeStream:
         await self.aclose()
         return False  # don't suppress exceptions
 
+    # ── async iteration (LiveKit uses `async for ev in stream`) ────────────
+    # Python looks up special methods (__aiter__, __anext__) on the TYPE,
+    # NOT via __getattr__ — so they must be defined explicitly on the wrapper.
+
+    def __aiter__(self):
+        """Delegate async iteration to the underlying stream."""
+        return self._delegate.__aiter__()
+
+    async def __anext__(self):
+        """Delegate to the underlying stream's __anext__."""
+        return await self._delegate.__anext__()
+
     # ── interface expected by LiveKit Agent ─────────────────────────────────
 
     @property
@@ -577,14 +589,15 @@ class MultilingualTTS(tts.TTS):
                 logger.warning(
                     f"TTS synthesize attempt {attempt + 1} failed: {exc}"
                 )
-                # Invalidate and recreate on next attempt
-                self._session._track_bg(
-                    self._session.invalidate_language(self.current_language)
-                )
         raise last_exc  # type: ignore[misc]
 
     def stream(self, *, conn_options=None) -> RaceFreeSynthesizeStream:
-        """Streaming synthesis with race-free websocket lifecycle."""
+        """Streaming synthesis with race-free websocket lifecycle.
+
+        Retries on transient failures without invalidating the TTS instance
+        between attempts — the internal ConnectionPool handles stale
+        connection recovery, and invalidating causes duplicate TTS creation.
+        """
         last_exc = None
         for attempt in range(TTS_WS_MAX_RETRIES + 1):
             try:
@@ -594,12 +607,6 @@ class MultilingualTTS(tts.TTS):
                 logger.warning(
                     f"TTS stream attempt {attempt + 1} failed: {exc}"
                 )
-                try:
-                    self._session._track_bg(
-                        self._session.invalidate_language(self.current_language)
-                    )
-                except RuntimeError:
-                    pass
         raise last_exc  # type: ignore[misc]
 
     async def update_options(
@@ -939,14 +946,14 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_error(ev):
         logger.error(f"Agent session error: {ev}")
 
-    try:
-        await session.start(
-            agent=agent,
-            room=ctx.room,
-        )
-    finally:
-        await agent._tts_session.aclose()
-        logger.info("TTS session manager closed — entrypoint cleanup complete")
+    # session.start() returns when the session ends.  on_exit() fires
+    # as part of session teardown and handles TTS cleanup.  No finally
+    # block here — it would fire prematurely in console mode where
+    # session.start() may return before the agent finishes its first turn.
+    await session.start(
+        agent=agent,
+        room=ctx.room,
+    )
 
 
 if __name__ == "__main__":

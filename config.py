@@ -53,61 +53,93 @@ TTS_WS_MAX_RETRIES = 2  # stale WebSocket recovery attempts
 LLM_MODEL = "sarvam-30b"  # Sarvam model name (only used when provider is "sarvam")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "sarvam")  # "sarvam" or "openai"
 OPENAI_MODEL = os.getenv(
-    "OPENAI_MODEL", "gpt-4o"
+    "OPENAI_MODEL", "gpt-4o-mini"
 )  # OpenAI model (only used when provider is "openai")
 
 # ── Turn detection (aggressive conversational tuning) ─────────────────────────
 
 ENDPOINTING_MODE = "dynamic"  # "fixed" or "dynamic" — dynamic adapts to speaker cadence
-ENDPOINTING_MIN_DELAY = 0.05   # 50ms minimum silence before end-of-turn (was 70ms)
-ENDPOINTING_MAX_DELAY = 0.25   # 250ms cap — aggressive for fast Indian-language turn-taking (was 500ms)
-ENDPOINTING_ALPHA = 0.7        # EMA coefficient — more responsive to current speech (was 0.8)
+ENDPOINTING_MIN_DELAY = 0.05  # 50ms minimum silence before end-of-turn (was 70ms)
+ENDPOINTING_MAX_DELAY = (
+    0.25  # 250ms cap — aggressive for fast Indian-language turn-taking (was 500ms)
+)
+ENDPOINTING_ALPHA = 0.7  # EMA coefficient — more responsive to current speech (was 0.8)
 
 # ── Preemptive generation ────────────────────────────────────────────────────
 PREEMPTIVE_GENERATION = True
 PREEMPTIVE_TTS = True  # start TTS as soon as LLM produces first tokens
 
 # ── Interruption handling ────────────────────────────────────────────────────
-INTERRUPTION_MIN_DURATION = 0.2   # 200ms minimum speech to register interruption (was 300ms)
-BACKCHANNEL_BOUNDARY_START = 0.3  # suppress interruptions 300ms after agent starts (was 500ms)
-BACKCHANNEL_BOUNDARY_END = 1.5    # suppress interruptions 1.5s before agent ends (was 2.0s)
+INTERRUPTION_MIN_DURATION = (
+    0.2  # 200ms minimum speech to register interruption (was 300ms)
+)
+BACKCHANNEL_BOUNDARY_START = (
+    0.3  # suppress interruptions 300ms after agent starts (was 500ms)
+)
+BACKCHANNEL_BOUNDARY_END = (
+    1.5  # suppress interruptions 1.5s before agent ends (was 2.0s)
+)
 
 # ── Language hysteresis (REAL — not fake) ─────────────────────────────────────
 # Requires the same language across N consecutive *meaningful* turns before
 # switching TTS websocket.  Short/filler transcripts are completely ignored.
-LANG_SWITCH_MIN_CHARS = 15       # ignore language switch if transcript < 15 characters (was 5)
-LANG_SWITCH_MIN_CONFIDENCE = 0.8 # reserved for future STT confidence field
-LANG_SWITCH_CONSECUTIVE = 3      # require same language for 3 consecutive turns (was 2)
+LANG_SWITCH_MIN_CHARS = (
+    15  # ignore language switch if transcript < 15 characters (was 5)
+)
+LANG_SWITCH_MIN_CONFIDENCE = 0.8  # reserved for future STT confidence field
+LANG_SWITCH_CONSECUTIVE = 3  # require same language for 3 consecutive turns (was 2)
 
 # ── Filler suppression ────────────────────────────────────────────────────────
 # Utterances matching these patterns or shorter than FILLER_MIN_LENGTH are
 # dropped entirely — no LLM generation, no TTS, no state transition.
-FILLER_MIN_LENGTH = 4            # transcript shorter than this is always suppressed
+FILLER_MIN_LENGTH = 4  # transcript shorter than this is always suppressed
 FILLER_PATTERNS: set[str] = {
-    "hmm", "umm", "uh", "ah", "eh", "oh", "er",
-    "haan", "hmm hmm", "umm hmm",
-    "okay", "ok", "hmm okay", "okay okay",
-    "achha", "acha", "theek", "theek hai",
-    "haan ji", "ji haan", "ji",
-    "nahi", "nahin", "na",
-    "kya", "kyaa",
-    "huh", "huh?", "what?", "what",
+    "hmm",
+    "umm",
+    "uh",
+    "ah",
+    "eh",
+    "oh",
+    "er",
+    "haan",
+    "hmm hmm",
+    "umm hmm",
+    "okay",
+    "ok",
+    "hmm okay",
+    "okay okay",
+    "achha",
+    "acha",
+    "theek",
+    "theek hai",
+    "haan ji",
+    "ji haan",
+    "ji",
+    "nahi",
+    "nahin",
+    "na",
+    "kya",
+    "kyaa",
+    "huh",
+    "huh?",
+    "what?",
+    "what",
 }
 
 # ── Transcript deduplication ─────────────────────────────────────────────────
 DEDUP_WINDOW_SECONDS = 2.0  # ignore repeated final transcripts within this window
-DEDUP_MAX_HISTORY = 20      # max recent transcript hashes to track
+DEDUP_MAX_HISTORY = 20  # max recent transcript hashes to track
 
 # ── Context management ───────────────────────────────────────────────────────
-MAX_CONTEXT_ITEMS = 50       # total items before summarization + trimming kicks in
-SLIDING_WINDOW_TURNS = 10    # number of most-recent turns kept verbatim
+MAX_CONTEXT_ITEMS = 50  # total items before summarization + trimming kicks in
+SLIDING_WINDOW_TURNS = 10  # number of most-recent turns kept verbatim
 
 # ── TTS session management ───────────────────────────────────────────────────
 # Persistent websockets: Sarvam ConnectionPool keeps websockets alive across
 # turns.  We NEVER close them per-turn — only on confirmed language switch
 # or process shutdown.
 TTS_POOL_MAX_SESSION_DURATION = 3600  # 1 hour per websocket before rotation
-TTS_CLOSE_DRAIN_TIMEOUT = 0.1         # seconds to drain in-flight writes before close
+TTS_CLOSE_DRAIN_TIMEOUT = 0.1  # seconds to drain in-flight writes before close
 
 # Noisy environment — uncomment these and comment the above when background noise is present
 # ENDPOINTING_MIN_DELAY = 0.3   # 300ms
