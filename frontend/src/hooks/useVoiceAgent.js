@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
-import { Room, RoomEvent } from 'livekit-client';
+import { Room, RoomEvent, RoomConnectOptions } from 'livekit-client';
 
 const TOKEN_URL = `http://${window.location.hostname}:8000/token`;
 const ROOM_NAME = 'school-voice-room';
@@ -36,7 +36,7 @@ export default function useVoiceAgent() {
       const data = await resp.json();
 
       // Step 2 — connect to LiveKit
-      const room = new Room({ adaptiveStream: true, dynacast: true });
+      const room = new Room({ dynacast: true });
       roomRef.current = room;
 
       room.on(RoomEvent.Connected, () => {
@@ -83,7 +83,10 @@ export default function useVoiceAgent() {
       });
 
       try {
-        await room.connect(data.url, data.token);
+        const connectOpts = new RoomConnectOptions({ autoSubscribe: true });
+        await room.connect(data.url, data.token, connectOpts);
+        // Enable microphone so the agent can hear the user
+        await room.localParticipant.setMicrophoneEnabled(true);
       } catch (lkErr) {
         throw new Error(`LIVEKIT_CONNECT_FAILED:${lkErr.message || 'unknown'}`);
       }

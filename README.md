@@ -23,7 +23,7 @@ Browser ──WebRTC──▶ LiveKit Cloud (BVC noise cancellation)
      │    stores language from STT event       │
      │    routes to correct TTS voice          │
      │                                         │
-     │  Sarvam LLM (sarvam-30b)               │
+     │  Sarvam LLM (sarvam-30b)                │
      │    multilingual responses               │
      │    text-based emotional expression      │
      │    tool calling (homework, attendance)  │
