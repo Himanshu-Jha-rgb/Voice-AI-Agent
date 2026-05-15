@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from livekit.agents import JobContext, WorkerOptions, cli, tts
-from livekit.agents.llm import ChatContext
+from livekit.agents.llm import ChatContext, ChatMessage
 from livekit.agents.voice import Agent, AgentSession
 from livekit.agents.voice.turn import TurnHandlingOptions, EndpointingOptions
 from livekit.plugins import sarvam, silero
@@ -35,6 +35,7 @@ from config import (
     TTS_WS_MAX_RETRIES,
     MIN_ENDPOINTING_DELAY,
     MAX_CONTEXT_ITEMS,
+    SLIDING_WINDOW_TURNS,
 )
 from utils.prompts import SYSTEM_PROMPT, GREETING_INSTRUCTIONS
 from utils.tools import (
@@ -44,6 +45,7 @@ from utils.tools import (
     search_knowledge_base,
     explain_with_example,
 )
+from utils.summarize import summarize_conversation
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("school-voice-agent")
@@ -178,6 +180,8 @@ _final_seen_this_turn: bool = False
 class SchoolVoiceAgent(Agent):
     def __init__(self) -> None:
         self._multilingual_tts = MultilingualTTS(default_language_code="hi-IN")
+        self._rolling_summary: Optional[str] = None
+        self._summary_in_progress: bool = False
 
         if LLM_PROVIDER == "openai":
             from livekit.plugins.openai import LLM as OpenAILLM
@@ -224,28 +228,58 @@ class SchoolVoiceAgent(Agent):
                 lang = LANGUAGE_CODE_MAP[_detected_language]
                 logger.info(f"Language switch: {self._multilingual_tts.current_language} → {_detected_language} ({lang.name})")
 
-        # Reset for next turn
+        # Reset per-turn globals
         _detected_language = None
         _final_seen_this_turn = False
 
-        # Invalidate the old TTS instance so its stale WebSocket stops producing
-        # audio.  Otherwise the old stream and the new one play simultaneously
-        # (two voices).  We do this regardless of language switch because even a
-        # same-language turn creates a new WebSocket on the cached instance.
+        # Invalidate the old TTS instance so its stale WebSocket stops producing audio
         old_language = self._multilingual_tts.current_language
         await self._multilingual_tts._invalidate_tts(old_language)
-
-        # Now switch to the target language (triggers fresh TTS creation on next stream())
         self._multilingual_tts.current_language = target_language
 
-        # Trim chat context to keep conversation focused
+        # Two-layer chat context assembly
         items = self._chat_ctx.items
         if len(items) > MAX_CONTEXT_ITEMS:
-            before = len(items)
-            # Keep system prompt (index 0) + last (MAX_CONTEXT_ITEMS - 1) items
-            trimmed = [items[0]] + items[-(MAX_CONTEXT_ITEMS - 1):]
-            await self.update_chat_ctx(ChatContext(trimmed))
-            logger.info(f"Trimmed chat context: {before} → {len(trimmed)} items")
+            system_item = items[0]
+
+            # Keep the last SLIDING_WINDOW_TURNS user+assistant pairs verbatim
+            keep_count = SLIDING_WINDOW_TURNS * 2
+            recent_items = items[-keep_count:] if len(items) > keep_count else items[1:]
+            old_items = items[1:-keep_count] if len(items) - 1 > keep_count else []
+
+            new_items = [system_item]
+
+            # Layer 1: Rolling summary (compressed older conversation)
+            if self._rolling_summary:
+                new_items.append(
+                    ChatMessage(role="system", text=f"## Earlier conversation\n{self._rolling_summary}")
+                )
+
+            # Layer 2: Recent turns verbatim (sliding window)
+            new_items.extend(recent_items)
+
+            await self.update_chat_ctx(ChatContext(new_items))
+            logger.info(
+                f"Two-layer context: summary={bool(self._rolling_summary)}, "
+                f"recent_turns={len(recent_items) // 2}"
+            )
+
+            # Kick off async summarization of the dropped items
+            if old_items and not self._summary_in_progress:
+                self._summary_in_progress = True
+                asyncio.create_task(self._generate_rolling_summary(old_items))
+
+    async def _generate_rolling_summary(self, old_items: list) -> None:
+        """Asynchronously produce a summary of dropped context items."""
+        try:
+            summary = await summarize_conversation(old_items, LLM_PROVIDER)
+            if summary:
+                self._rolling_summary = summary
+                logger.info(f"Rolling summary updated ({len(summary)} chars)")
+        except Exception as e:
+            logger.warning(f"Rolling summary generation failed: {e}")
+        finally:
+            self._summary_in_progress = False
 
 
 async def entrypoint(ctx: JobContext) -> None:
