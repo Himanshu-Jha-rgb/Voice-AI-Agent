@@ -17,18 +17,24 @@ Browser ──WebRTC──▶ LiveKit Cloud (BVC noise cancellation)
               → auto-detects language, ~70ms latency
                         │
                         ▼
-              Language detection (user_input_transcribed event)
-              → stores detected language, sets MultilingualTTS.current_language
+              FillerFilter (suppress "hmm", "uh", etc. — no LLM/TTS)
+                        │
+                        ▼
+              LanguageTracker (REAL hysteresis: 3 consecutive turns, ≥15 chars)
+              → NO websocket teardown during pending state
                         │
                         ▼
               Sarvam LLM (multilingual, text-based emotion)
                         │
                         ▼
-              MultilingualTTS → routes to correct Sarvam TTS instance
-              (lazy pool: 1 Sarvam TTS per language)
+              MultilingualTTS → TTSSessionManager → Sarvam TTS instance
+              (persistent pool: 1 TTS per language, websockets NEVER closed per-turn)
                         │
                         ▼
-              Sarvam TTS (bulbul:v3, WebSocket streaming) → Browser
+              RaceFreeSynthesizeStream (WSState machine, drain-before-close)
+                        │
+                        ▼
+              Sarvam TTS (bulbul:v3, persistent WebSocket) → Browser
 ```
 
 ## Running the project
@@ -57,9 +63,9 @@ uv run python agent.py console
 
 | File | Purpose |
 |------|---------|
-| `agent.py` | Core: `MultilingualTTS` wrapper, `SchoolVoiceAgent`, `entrypoint` |
+| `agent.py` | Core: `WSState` enum, `FillerFilter`, `LanguageTracker`, `TTSSessionManager`, `RaceFreeSynthesizeStream`, `MultilingualTTS`, `SchoolVoiceAgent`, `entrypoint` |
 | `server.py` | FastAPI server with `/token` endpoint for LiveKit JWT |
-| `config.py` | `LanguageConfig` dataclass, 11 languages, STT/TTS/VAD constants |
+| `config.py` | `LanguageConfig` dataclass, 11 languages, STT/TTS/VAD constants, filler patterns, hysteresis thresholds |
 | `utils/prompts.py` | `SYSTEM_PROMPT` (multilingual, emotional intelligence, school context) |
 | `utils/tools.py` | 5 async tool functions (`lookup_homework`, `check_attendance`, etc.) |
 | `frontend/src/App.jsx` | Root component — wires Orb, StatusLabel, LanguageBar, ChatTranscript, ErrorBanner, Controls |
@@ -111,26 +117,54 @@ Uses `window.location.hostname` so the frontend works regardless of whether acce
 
 ## Core patterns
 
-### MultilingualTTS (`agent.py:44-130`)
-- Extends `livekit.agents.tts.TTS` — is a drop-in TTS for LiveKit's `Agent`
-- Lazily creates one `sarvam.TTS` instance per detected language
-- `current_language` property set by `SchoolVoiceAgent.on_user_turn_completed()`
-- Delegates `synthesize()` and `stream()` to the correct per-language instance
-- `prewarm()` is **sync** (matches base class) — calls through to each Sarvam TTS instance synchronously
-- Each instance uses the speaker from `config.py` `LanguageConfig.tts_speaker`
+### TTS Session Manager (`agent.py:TTSSessionManager`)
+Centralized owner of all TTS websocket lifecycle. Design invariants:
+- ONE `sarvam.TTS` instance per language (lazily created, persistent for session lifetime)
+- Sarvam's internal `ConnectionPool` keeps websockets alive across turns
+- Websockets are **never** closed between turns — only on confirmed language switch or shutdown
+- `async Lock` serializes all state transitions (create, invalidate, close)
+- `invalidate_language()` called **only** when hysteresis confirms a language switch
 
-### Language detection flow
+### MultilingualTTS (`agent.py:MultilingualTTS`)
+- Extends `livekit.agents.tts.TTS` — drop-in TTS for LiveKit's `Agent`
+- Thin adapter over `TTSSessionManager` — delegates all lifecycle decisions
+- `synthesize()` → returns Sarvam `ChunkedStream` (HTTP POST, no websocket race risk)
+- `stream()` → returns `RaceFreeSynthesizeStream` wrapper with race-free `aclose()`
+
+### RaceFreeSynthesizeStream (`agent.py:RaceFreeSynthesizeStream`)
+Wraps Sarvam's `SynthesizeStream` to prevent the `aiohttp` "Cannot write to closing transport" crash:
+1. **State machine** (`WSState`: DISCONNECTED → CONNECTING → CONNECTED → CLOSING → CLOSED)
+2. `aclose()` acquires `_close_lock`, sets CLOSING, **drains in-flight writes** (100ms), then closes
+3. Duplicate close calls are no-ops (idempotent via state check)
+4. Transport-close errors during teardown are caught and suppressed
+5. The underlying websocket stays alive in Sarvam's `ConnectionPool` for the next turn
+
+### Language detection flow (with REAL hysteresis)
 1. STT runs with `language="unknown"` — Sarvam auto-detects
 2. `user_input_transcribed` event stores detected language as `_detected_language`
-3. `on_user_turn_completed(turn_ctx, *, new_message=None)` reads `_detected_language`
-4. If detected language differs from current → sets `multilingual_tts.current_language`
-5. Next TTS call routes to the correct voice automatically
+3. `on_user_turn_completed` checks `FillerFilter.is_filler(transcript)` — **filler → skip entirely**
+4. `LanguageTracker.record_turn()` records the detection (fillers record as "no decision")
+5. `LanguageTracker.should_switch()` requires **3 consecutive meaningful turns** (≥15 chars) in the same new language
+6. Until hysteresis confirms: keep current TTS websocket warm, no teardown
+7. Single-turn language mismatches: respond in detected language but **keep old TTS instance alive**
+
+### Filler suppression
+- `FillerFilter.is_filler()` checks: length < 4, exact match against 30+ filler patterns, or single/dual-word very-short utterances
+- When filler detected: **no LLM generation, no TTS, no state transition, no language recording**
+- Patterns include: hmm, uh, okay, haan, ji, kya, nahi, achha, theek hai, etc.
+
+### LanguageTracker (real hysteresis)
+- `LANG_SWITCH_MIN_CHARS = 15` — transcript must be ≥15 characters to count as meaningful
+- `LANG_SWITCH_CONSECUTIVE = 3` — same candidate language required for 3 consecutive meaningful turns
+- Short/filler utterances recorded as "no decision" (breaks any in-progress streak)
+- Flip-flopping languages (en→ta→en) never triggers a switch
 
 ### Turn detection
 - `AgentSession(vad=silero.VAD.load())` — Silero VAD for reliable speech detection
-- `TurnHandlingOptions(endpointing=EndpointingOptions(min_delay=0.07))` — 70ms endpointing tuned for fast Indian-language turn-taking
-- Barge-in handled automatically by LiveKit's AgentSession
-- For noisy environments: swap `MIN_ENDPOINTING_DELAY` and `MIN_SPEECH_DURATION` in `config.py` to the commented-out noisy values (300ms / 150ms)
+- `EndpointingOptions(min_delay=0.05, max_delay=0.25)` — 50ms floor, 250ms cap (aggressive conversational tuning)
+- `alpha=0.7` — more responsive EMA for faster adaptation to speaker cadence
+- `InterruptionOptions(min_duration=0.2)` — 200ms barge-in threshold
+- For noisy environments: swap constants in `config.py` to the commented-out noisy values
 
 ### Emotion handling
 - Sarvam TTS has **no SSML or emotion tags** (unlike Cartesia)
@@ -167,11 +201,17 @@ SARVAM_API_KEY=sk_xxxxxxxxxxxxxxxxxxxxxxxx
 
 ## Design decisions
 
+- **Centralized websocket ownership** — `TTSSessionManager` is the sole owner of all TTS websocket lifecycle. No scattered `ws.close()` calls. All state transitions serialized via `asyncio.Lock`.
+- **Persistent websocket pool** — Sarvam's internal `ConnectionPool` keeps websockets alive indefinitely (1h rotation). Websockets are NEVER closed between turns — only on confirmed language switch or process shutdown.
+- **Race-free stream wrapper** — `RaceFreeSynthesizeStream` wraps Sarvam's `SynthesizeStream` with a `WSState` state machine. `aclose()` drains in-flight writes (100ms) before touching the websocket, preventing the "Cannot write to closing transport" aiohttp crash.
+- **Real hysteresis (not fake)** — `LanguageTracker` requires 3 consecutive meaningful turns (≥15 chars) in the same language before switching TTS websockets. Fillers and short utterances break the streak. No websocket teardown during pending state.
+- **Filler suppression** — Utterances matching 30+ filler patterns or shorter than 4 characters are dropped entirely: no LLM, no TTS, no state transition. Eliminates spurious "Hmm" → full pipeline activation.
 - **TurnHandlingOptions API** — uses the new non-deprecated `turn_handling=TurnHandlingOptions(endpointing=EndpointingOptions(...))` pattern
 - **Silero VAD** — separate VAD model (`vad=silero.VAD.load()`) for reliable turn detection, following LiveKit's recommended pattern
-- **TTS pool, not single TTS with `update_options()`** — avoids WebSocket reconnect latency when switching languages mid-conversation
+- **Aggressive endpointing** — `min_delay=50ms`, `max_delay=250ms`, `alpha=0.7` — tuned for fast Indian-language turn-taking with minimal silence gaps
+- **TTS pool, not single TTS with `update_options()`** — avoids WebSocket reconnect latency when switching languages mid-conversation. One persistent `sarvam.TTS` per language.
 - **Sync prewarm** — `MultilingualTTS.prewarm()` is synchronous to match LiveKit's `TTS` base class signature
-- **Noisy environment config** — `config.py` has commented-out overrides (300ms endpointing, 150ms min speech) for background-noise-heavy settings
+- **Noisy environment config** — `config.py` has commented-out overrides (300ms endpointing, 600ms max) for background-noise-heavy settings
 - **React + Vite frontend** — componentized SPA, `livekit-client` as npm dep, fast HMR in dev, optimized production build
 - **Text-based emotion** — Sarvam lacks SSML; the LLM conveys emotion through word choice and Indian interjections
 - **Data messages to frontend** — agent publishes `{type: "transcript", role, text, language}` via LiveKit data channel for chat bubbles and language highlighting
