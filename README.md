@@ -2,28 +2,28 @@
 
 A conversational voice agent for schools across India. Supports **11 Indian languages** with **automatic detection**, tuned for **low latency**, **classroom noise**, and **natural interruptions**.
 
-Built on [LiveKit Agents](https://github.com/livekit/agents) + [Sarvam AI](https://sarvam.ai) (STT, TTS, and LLM).
+Built on [LiveKit Agents](https://github.com/livekit/agents) + [Sarvam AI](https://sarvam.ai) (STT, TTS) + [Groq/Llama-3](https://groq.com) (LLM) and features production-grade tracing via [Langfuse v4](https://langfuse.com).
 
 ## Architecture
 
 ```
 Browser ──WebRTC──▶ LiveKit Cloud (BVC noise cancellation)
                         │
-     ┌──────────────────▼─────────────────────┐
-     │            Voice AI Agent               │
-     │                                         │
-     │  Silero VAD (turn detection)            │
-     │    reliable speech start/end detection  │
-     │                                         │
-     │  Sarvam STT (Saaras v3)                 │
-     │    language="unknown" → auto-detect     │
-     │    flush_signal for secondary VAD       │
+     ┌──────────────────▼─────────────────────┐       ┌────────────────────┐
+     │            Voice AI Agent               │       │                    │
+     │                                         │       │  Langfuse v4       │
+     │  Silero VAD (turn detection)            │       │   - LLM TTFT       │
+     │    reliable speech start/end detection  │──────▶│   - TTS TTFB       │
+     │                                         │       │   - Tool tracing   │
+     │  Sarvam STT (Saaras v3)                 │       │   - Latency logs   │
+     │    language="unknown" → auto-detect     │       │                    │
+     │    flush_signal for secondary VAD       │       └────────────────────┘
      │                                         │
      │  Language detection                     │
      │    stores language from STT event       │
      │    routes to correct TTS voice          │
      │                                         │
-     │  Sarvam LLM (sarvam-30b)                │
+     │  LLM (Groq Llama-3 or Sarvam-30b)       │
      │    multilingual responses               │
      │    text-based emotional expression      │
      │    tool calling (homework, attendance)  │
@@ -42,10 +42,10 @@ Browser ──WebRTC──▶ LiveKit Cloud (BVC noise cancellation)
 | Browser → LiveKit | 20-40ms |
 | Sarvam STT | ~70ms |
 | Endpointing delay | 70ms |
-| Sarvam LLM (sarvam-30b) | 300-600ms |
+| Groq LLM (Llama-3) | **150-250ms** |
 | Sarvam TTS (first byte) | 100-200ms |
 | LiveKit → Browser | 20-40ms |
-| **Total** | **~700-1200ms** |
+| **Total** | **~430-670ms** |
 
 ## Quick start
 
@@ -54,6 +54,8 @@ Browser ──WebRTC──▶ LiveKit Cloud (BVC noise cancellation)
 - Python 3.10+
 - [LiveKit Cloud](https://cloud.livekit.io) account (free)
 - [Sarvam AI](https://dashboard.sarvam.ai) API key
+- [Groq](https://console.groq.com) API key (free, for Llama-3 LLM)
+- [Langfuse](https://langfuse.com) API key (free, for observability)
 
 ### Setup
 
@@ -180,6 +182,8 @@ Voice-AI-Agent/
 - **TTS connection pooling** — one WebSocket per language, pre-warmed synchronously, no reconnect on language switch
 - **BVC noise cancellation** — LiveKit server-side removes keyboard, fan, background voices
 - **50ms barge-in** — `min_speech_duration=0.05` enables instant interruption when user starts speaking
+- **Groq LLM Backend** — Llama-3 evaluates tools and streams first token in under 200ms, completely eliminating OpenAI tool-calling overhead
+- **Langfuse Observability** — OpenTelemetry-based hierarchical tracing of conversation turns, LLM TTFT, TTS TTFB, and tool latency
 - **Noisy environment fallback** — `config.py` has commented-out overrides (300ms/150ms) when background noise is present
 - **React + Vite** — componentized frontend with `livekit-client` as npm dependency, fast HMR in dev
 
@@ -191,4 +195,3 @@ Voice-AI-Agent/
 - For noisy environments like crowded classrooms, swap `config.py` to the commented-out noisy values
 - Tools are stubs returning mock data — replace with real school database/SIS integrations
 # Voice-AI-Agent
-kala
