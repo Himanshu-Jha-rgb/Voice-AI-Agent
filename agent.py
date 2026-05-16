@@ -38,6 +38,7 @@ from config import (
     LLM_MODEL,
     LLM_PROVIDER,
     OPENAI_MODEL,
+    GROQ_MODEL,
     TTS_MODEL,
     TTS_SAMPLE_RATE,
     TTS_PACE,
@@ -691,6 +692,16 @@ class SchoolVoiceAgent(Agent):
 
             llm = OpenAILLM(model=OPENAI_MODEL)
             logger.info(f"Using OpenAI LLM — model: {OPENAI_MODEL}")
+        elif LLM_PROVIDER == "groq":
+            from livekit.plugins.openai import LLM as OpenAILLM
+            import os
+
+            llm = OpenAILLM(
+                model=GROQ_MODEL,
+                base_url="https://api.groq.com/openai/v1",
+                api_key=os.getenv("GROQ_API_KEY")
+            )
+            logger.info(f"Using Groq LLM — model: {GROQ_MODEL}")
         else:
             llm = sarvam.LLM(model=LLM_MODEL)
             logger.info(f"Using Sarvam LLM — model: {LLM_MODEL}")
@@ -708,11 +719,11 @@ class SchoolVoiceAgent(Agent):
             llm=llm,
             tts=self._multilingual_tts,
             tools=[
-                lookup_homework,
-                check_attendance,
-                get_school_timetable,
-                search_knowledge_base,
-                explain_with_example,
+                # lookup_homework,
+                # check_attendance,
+                # get_school_timetable,
+                # search_knowledge_base,
+                # explain_with_example,
             ],
         )
 
@@ -901,7 +912,8 @@ class SchoolVoiceAgent(Agent):
         if hasattr(self, "_active_turn_span_id"):
             inp = []
             if hasattr(chat_ctx, "messages"):
-                for m in chat_ctx.messages:
+                messages = chat_ctx.messages() if callable(chat_ctx.messages) else chat_ctx.messages
+                for m in messages:
                     if isinstance(m.content, str):
                         inp.append({"role": getattr(m, "role", "unknown"), "content": m.content})
                     elif isinstance(m.content, list):
