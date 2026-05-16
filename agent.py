@@ -23,6 +23,9 @@ from livekit.agents.voice.turn import (
     PreemptiveGenerationOptions,
 )
 from livekit.plugins import sarvam, silero
+from langfuse import Langfuse
+
+langfuse_client = Langfuse()
 
 from config import (
     LANGUAGE_CODE_MAP,
@@ -78,6 +81,7 @@ from utils.tools import (
     get_school_timetable,
     search_knowledge_base,
     explain_with_example,
+    active_turn_span_var,
 )
 from utils.summarize import summarize_conversation
 
@@ -248,48 +252,6 @@ class TranscriptDedup:
 
 def _text_hash(text: str) -> str:
     return hashlib.md5(text.strip().lower().encode()).hexdigest()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Latency Tracker — precise per-turn instrumentation
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class LatencyTracker:
-    """Precise per-turn latency instrumentation.
-
-    Records timestamps at each pipeline stage and logs detailed
-    breakdowns so bottlenecks are visible in production.
-    """
-
-    def __init__(self):
-        self.vad_start: float = 0.0
-        self.vad_end: float = 0.0
-        self.stt_first_partial: float = 0.0
-        self.stt_final: float = 0.0
-        self.llm_request_start: float = 0.0
-        self.llm_first_token: float = 0.0
-        self.tts_stream_start: float = 0.0
-        self.tts_first_audio: float = 0.0
-        self.playback_start: float = 0.0
-
-    def reset(self) -> None:
-        self.__init__()
-
-    def log_metrics(self) -> None:
-        m = {}
-        if self.vad_start and self.vad_end:
-            m["vad_latency_ms"] = round((self.vad_end - self.vad_start) * 1000)
-        if self.stt_first_partial and self.stt_final:
-            m["stt_latency_ms"] = round((self.stt_final - self.stt_first_partial) * 1000)
-        if self.llm_request_start and self.llm_first_token:
-            m["llm_ttft_ms"] = round((self.llm_first_token - self.llm_request_start) * 1000)
-        if self.tts_stream_start and self.tts_first_audio:
-            m["tts_ttfb_ms"] = round((self.tts_first_audio - self.tts_stream_start) * 1000)
-        if self.llm_first_token and self.tts_first_audio:
-            m["first_token_to_audio_ms"] = round((self.tts_first_audio - self.llm_first_token) * 1000)
-        if self.vad_start and self.tts_first_audio:
-            m["total_e2e_ms"] = round((self.tts_first_audio - self.vad_start) * 1000)
-        logger.info(f"LATENCY: {json.dumps(m, indent=None)}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -509,6 +471,21 @@ class RaceFreeSynthesizeStream:
         self._session = session_manager
         self._state = WSState.CONNECTED
         self._close_lock = asyncio.Lock()
+        
+        ctx_var = active_turn_span_var.get()
+        if ctx_var:
+            self._tts_span = langfuse_client.start_observation(
+                name="tts",
+                trace_context={"trace_id": ctx_var["trace_id"], "parent_span_id": ctx_var["span_id"]},
+                metadata={
+                    "language": session_manager.current_language,
+                    "model": getattr(self._delegate, "model", "unknown"),
+                }
+            )
+            self._start_time = time.perf_counter()
+            self._first_audio = False
+        else:
+            self._tts_span = None
 
     # ── async context manager (LiveKit uses `async with tts.stream() as stream`) ──
 
@@ -537,7 +514,11 @@ class RaceFreeSynthesizeStream:
 
     async def __anext__(self):
         """Delegate to the underlying stream's __anext__."""
-        return await self._delegate.__anext__()
+        chunk = await self._delegate.__anext__()
+        if self._tts_span and not self._first_audio:
+            self._first_audio = True
+            self._tts_span.update(metadata={"ttfb_ms": (time.perf_counter() - self._start_time) * 1000})
+        return chunk
 
     # ── interface expected by LiveKit Agent ─────────────────────────────────
 
@@ -582,6 +563,8 @@ class RaceFreeSynthesizeStream:
                 logger.warning(f"Error during stream close: {e}")
         finally:
             self._state = WSState.CLOSED
+            if self._tts_span:
+                self._tts_span.end()
 
     # ── delegation ──────────────────────────────────────────────────────────
 
@@ -703,9 +686,6 @@ class SchoolVoiceAgent(Agent):
         # Tracked background tasks — bounded concurrency, cleanup-aware
         self._bg_tasks: set[asyncio.Task] = set()
 
-        # Per-turn latency instrumentation
-        self._latency = LatencyTracker()
-
         if LLM_PROVIDER == "openai":
             from livekit.plugins.openai import LLM as OpenAILLM
 
@@ -767,12 +747,16 @@ class SchoolVoiceAgent(Agent):
 
     async def on_user_turn_completed(self, turn_ctx, *, new_message=None) -> None:
         global _detected_language, _detected_transcript
+        
+        turn_span = langfuse_client.start_observation(
+            name="user-turn",
+            trace_context={"trace_id": self._session_trace_id, "parent_span_id": getattr(self, "_root_span_id", None)}
+        )
+        self._active_turn_span_id = turn_span.id
+        active_turn_span_var.set({"trace_id": self._session_trace_id, "span_id": turn_span.id})
 
         transcript = _detected_transcript or ""
         transcript_length = len(transcript)
-
-        # ── Latency: mark LLM request start ──────────────────────────────────
-        self._latency.llm_request_start = time.monotonic()
 
         logger.info(
             f"Turn completed — detected language: {_detected_language}, "
@@ -789,7 +773,6 @@ class SchoolVoiceAgent(Agent):
             )
             _detected_language = None
             _detected_transcript = ""
-            self._latency.reset()
             return
 
         # ── Step 2: Record turn in hysteresis tracker ───────────────────────
@@ -802,6 +785,16 @@ class SchoolVoiceAgent(Agent):
         if switch_to:
             # Hysteresis confirmed — permanent switch.
             # Pools are NEVER invalidated; all languages stay warm.
+            langfuse_client.create_event(
+                name="language-switch",
+                trace_context={"trace_id": self._session_trace_id, "parent_span_id": self._active_turn_span_id},
+                metadata={
+                    "from": target_language,
+                    "to": switch_to,
+                    "temporary": False,
+                    "hysteresis_confirmed": True,
+                }
+            )
             lang = LANGUAGE_CODE_MAP[switch_to]
             logger.info(
                 f"Language switch CONFIRMED: {target_language} → {switch_to} "
@@ -815,6 +808,16 @@ class SchoolVoiceAgent(Agent):
             and transcript_length >= LANG_SWITCH_MIN_CHARS
             and _detected_language != self._tts_session.current_language
         ):
+            langfuse_client.create_event(
+                name="language-switch",
+                trace_context={"trace_id": self._session_trace_id, "parent_span_id": self._active_turn_span_id},
+                metadata={
+                    "from": target_language,
+                    "to": _detected_language,
+                    "temporary": True,
+                    "hysteresis_confirmed": False,
+                }
+            )
             # Single-turn override: respond in detected language but keep
             # current TTS instance warm.  If user switches back next turn,
             # the old websocket is still alive — no reconnect penalty.
@@ -827,6 +830,12 @@ class SchoolVoiceAgent(Agent):
         # else: keep current language (filler already suppressed above)
 
         self._tts_session.current_language = target_language
+        
+        turn_span.update(metadata={
+            "detected_language": _detected_language,
+            "transcript_length": transcript_length,
+            "final_tts_language": target_language,
+        })
 
         # ── Step 4: Reset per-turn globals ──────────────────────────────────
         _detected_language = None
@@ -886,11 +895,31 @@ class SchoolVoiceAgent(Agent):
         chunk_count = 0
         char_count = 0
         first_content = True
-        start = time.monotonic()
+        start = time.perf_counter()
+        
+        generation = None
+        if hasattr(self, "_active_turn_span_id"):
+            inp = []
+            if hasattr(chat_ctx, "messages"):
+                for m in chat_ctx.messages:
+                    if isinstance(m.content, str):
+                        inp.append({"role": getattr(m, "role", "unknown"), "content": m.content})
+                    elif isinstance(m.content, list):
+                        content_str = " ".join(str(getattr(c, "text", c)) for c in m.content)
+                        inp.append({"role": getattr(m, "role", "unknown"), "content": content_str})
+            generation = langfuse_client.start_observation(
+                as_type="generation",
+                name="llm-generation",
+                model=OPENAI_MODEL if LLM_PROVIDER == "openai" else LLM_MODEL,
+                input=inp,
+                trace_context={"trace_id": self._session_trace_id, "parent_span_id": self._active_turn_span_id}
+            )
+
+        full_response_text = ""
 
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             chunk_count += 1
-            now = time.monotonic()
+            now = time.perf_counter()
 
             # Extract text from the chunk (str or ChatChunk with delta)
             text = None
@@ -901,23 +930,34 @@ class SchoolVoiceAgent(Agent):
 
             if text:
                 char_count += len(text)
+                full_response_text += text
                 if first_content:
                     first_content = False
-                    if not self._latency.llm_first_token:
-                        self._latency.llm_first_token = now
-                        ttft = round((now - self._latency.llm_request_start) * 1000)
-                        logger.info(
-                            f"LLM_FIRST_TOKEN: {text[:40]!r} "
-                            f"llm_ttft_ms={ttft} "
-                            f"chunk={chunk_count}"
-                        )
+                    ttft = (now - start) * 1000
+                    if generation:
+                        generation.update(metadata={"ttft_ms": ttft})
+                    logger.info(
+                        f"LLM_FIRST_TOKEN: {text[:40]!r} "
+                        f"llm_ttft_ms={round(ttft)} "
+                        f"chunk={chunk_count}"
+                    )
 
             yield chunk
 
-        elapsed = round((time.monotonic() - start) * 1000)
+        elapsed = (time.perf_counter() - start) * 1000
+        if generation:
+            generation.update(
+                output=full_response_text,
+                metadata={
+                    "token_count": chunk_count,
+                    "char_count": char_count,
+                    "elapsed_ms": elapsed,
+                }
+            )
+            generation.end()
         logger.info(
             f"LLM stream complete: chunks={chunk_count} "
-            f"chars={char_count} elapsed_ms={elapsed}"
+            f"chars={char_count} elapsed_ms={round(elapsed)}"
         )
 
     async def _generate_rolling_summary(self, old_items: list) -> None:
@@ -939,7 +979,24 @@ class SchoolVoiceAgent(Agent):
 async def entrypoint(ctx: JobContext) -> None:
     logger.info(f"User connected to room: {ctx.room.name}")
 
+    session_trace_id = langfuse_client.create_trace_id()
+    
+    root_span = langfuse_client.start_observation(
+        name="voice-session",
+        trace_context={"trace_id": session_trace_id},
+        metadata={
+            "room": ctx.room.name,
+            "llm_model": OPENAI_MODEL if LLM_PROVIDER == "openai" else LLM_MODEL,
+            "stt_model": STT_MODEL,
+            "tts_model": TTS_MODEL,
+        }
+    )
+
     agent = SchoolVoiceAgent()
+    agent._session_trace_id = session_trace_id
+    agent._root_span_id = root_span.id
+    agent._active_turn_span_id = root_span.id
+    active_turn_span_var.set({"trace_id": session_trace_id, "span_id": root_span.id})
 
     session = AgentSession(
         vad=silero.VAD.load(),
@@ -978,17 +1035,24 @@ async def entrypoint(ctx: JobContext) -> None:
         language = getattr(ev, "language", None)
         is_final = getattr(ev, "is_final", False)
 
-        now = time.monotonic()
-
-        # ── Latency: mark first partial ────────────────────────────────────
-        if transcript and not is_final and not agent._latency.stt_first_partial:
-            agent._latency.stt_first_partial = now
-            if not agent._latency.vad_start:
-                agent._latency.vad_start = now
+        if transcript and not is_final:
+            if getattr(agent, "_stt_span", None) is None:
+                if hasattr(agent, "_active_turn_span_id") and agent._active_turn_span_id:
+                    agent._stt_span = langfuse_client.start_observation(
+                        name="stt",
+                        trace_context={"trace_id": agent._session_trace_id, "parent_span_id": agent._active_turn_span_id}
+                    )
 
         if is_final:
-            agent._latency.stt_final = now
-            agent._latency.vad_end = now
+            if getattr(agent, "_stt_span", None):
+                agent._stt_span.update(metadata={
+                    "transcript": transcript,
+                    "language": language,
+                    "is_final": is_final,
+                    "transcript_length": len(transcript)
+                })
+                agent._stt_span.end()
+                agent._stt_span = None
             logger.debug(f"STT final — '{transcript[:50]}' lang={language}")
 
         # First language detection for this turn wins
@@ -1021,12 +1085,22 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("speech_created")
     def _on_speech_created(ev):
-        now = time.monotonic()
-        agent._latency.tts_stream_start = now
-        if not agent._latency.tts_first_audio:
-            agent._latency.tts_first_audio = now
-            agent._latency.log_metrics()
         logger.debug("Agent speech created")
+
+    @session.on("agent_speech_interrupted")
+    def _on_agent_interrupted(ev):
+        if hasattr(agent, "_active_turn_span_id"):
+            langfuse_client.create_event(name="interruption-start", trace_context={"trace_id": agent._session_trace_id, "parent_span_id": agent._active_turn_span_id})
+
+    @session.on("agent_speech_resumed")
+    def _on_agent_resumed(ev):
+        if hasattr(agent, "_active_turn_span_id"):
+            langfuse_client.create_event(name="interruption-resume", trace_context={"trace_id": agent._session_trace_id, "parent_span_id": agent._active_turn_span_id})
+
+    @session.on("agent_speech_canceled")
+    def _on_agent_canceled(ev):
+        if hasattr(agent, "_active_turn_span_id"):
+            langfuse_client.create_event(name="interruption-cancel", trace_context={"trace_id": agent._session_trace_id, "parent_span_id": agent._active_turn_span_id})
 
     @session.on("conversation_item_added")
     def _on_conversation_item(ev):

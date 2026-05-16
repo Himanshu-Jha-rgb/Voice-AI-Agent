@@ -10,5 +10,5 @@ dependencies = [
     "uvicorn[standard]",
     "python-dotenv",
     "numpy",
-    "langfuse>=2.0",
+    "langfuse>=4.0",
 ]
