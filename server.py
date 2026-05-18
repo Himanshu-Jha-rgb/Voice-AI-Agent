@@ -45,6 +45,28 @@ async def get_token(room_name: str = "school-voice-room", participant_name: str 
     }
 
 
+@app.post("/token")
+async def post_token(body: dict):
+    """POST /token endpoint compatible with LiveKit TokenSource.endpoint()."""
+    room_name = body.get("room_name", "school-voice-room")
+    participant_name = body.get("participant_name") or f"user-{uuid.uuid4().hex[:8]}"
+
+    token = api.AccessToken(
+        api_key=os.environ["LIVEKIT_API_KEY"],
+        api_secret=os.environ["LIVEKIT_API_SECRET"],
+    ).with_identity(participant_name).with_name(participant_name).with_grants(
+        api.VideoGrants(
+            room_join=True,
+            room=room_name,
+        )
+    )
+
+    return {
+        "server_url": os.environ["LIVEKIT_URL"],
+        "participant_token": token.to_jwt(),
+    }
+
+
 # Mount the built frontend
 # Ensure the directory exists (it will be created during Docker build)
 frontend_path = os.path.join(os.path.dirname(__file__), "frontend/dist")

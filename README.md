@@ -2,100 +2,103 @@
 
 A conversational voice agent for schools across India. Supports **11 Indian languages** with **automatic detection**, tuned for **low latency**, **classroom noise**, and **natural interruptions**.
 
-Built on [LiveKit Agents](https://github.com/livekit/agents) + [Sarvam AI](https://sarvam.ai) (STT, TTS) + [Groq/Llama-3](https://groq.com) (LLM) and features production-grade tracing via [Langfuse v4](https://langfuse.com).
+Built on [LiveKit Agents](https://github.com/livekit/agents) + [Sarvam AI](https://sarvam.ai) (STT, TTS, LLM) with configurable LLM providers (Sarvam, OpenAI, Groq) and production-grade tracing via [Langfuse v4](https://langfuse.com).
 
 ## Architecture
 
 ```mermaid
 graph TD
-    %% Define Styles
     classDef frontend fill:#3b82f6,stroke:#1e3a8a,stroke-width:2px,color:white;
     classDef server fill:#10b981,stroke:#047857,stroke-width:2px,color:white;
     classDef livekit fill:#f59e0b,stroke:#b45309,stroke-width:2px,color:white;
     classDef agent fill:#8b5cf6,stroke:#4c1d95,stroke-width:2px,color:white;
     classDef ext fill:#64748b,stroke:#334155,stroke-width:2px,color:white;
-    
+
     subgraph Client [Client Side]
-        UI[React/Vite Frontend]:::frontend
+        UI[React/TS/Vite Frontend]:::frontend
     end
-    
+
     subgraph Backend [Backend Infrastructure]
         TokenServer[FastAPI Token Server]:::server
         LiveKitCloud[LiveKit Cloud / WebRTC Router]:::livekit
     end
-    
+
     subgraph Worker [Agent Worker Node]
         VoiceAgent[LiveKit Python Agent]:::agent
-        
+
         subgraph Pipeline [Voice Processing Pipeline]
             VAD[Silero VAD: Turn Detection]:::agent
             STT[Sarvam STT: Speech-to-Text & Lang Detect]:::agent
-            LLM[Groq / Llama-3 / OpenAI: LLM Generation]:::agent
+            Dedup[Transcript Dedup + Filler Filter]:::agent
+            Hysteresis[Language Hysteresis Tracker]:::agent
+            LLM[LLM Generation]:::agent
             TTS[Sarvam TTS: Multi-lang Streaming]:::agent
             Tools[School Operations Tools]:::agent
         end
     end
-    
+
     subgraph Externals [External Services]
         Langfuse[Langfuse: Observability & Tracing]:::ext
     end
 
-    %% Connections
     UI -- "1. Request Token (/token)" --> TokenServer
     TokenServer -- "2. Return LiveKit JWT" --> UI
-    
+
     UI <== "3. WebRTC (Audio In/Out)\nData Channel (Transcripts)" ==> LiveKitCloud
     LiveKitCloud <== "4. WebRTC\nData Channel" ==> VoiceAgent
-    
-    %% Pipeline Flow
+
     VoiceAgent --> |Audio stream| VAD
     VAD --> |Speech endpoints| STT
-    STT --> |Transcript + Language| LLM
+    STT --> |Transcript + Language| Dedup
+    Dedup --> |Clean transcript| Hysteresis
+    Hysteresis --> |Language decision| LLM
     LLM --> |Tool Call| Tools
     Tools -.-> |Tool Result| LLM
     LLM --> |Text chunks| TTS
     TTS --> |Synthesized Audio| VoiceAgent
-    
-    %% External Integrations
+
     VoiceAgent -. "Traces & Spans\n(TTFT, TTFB, latency)" .-> Langfuse
 ```
 
 ### Component Breakdown
 
-1. **Client Side**: Uses `livekit-client` via React/Vite. Fetches a token from the Token Server and connects to LiveKit Cloud. Renders the UI using data channel messages from the Agent.
-2. **Backend Infrastructure**: FastAPI Token Server issues secure LiveKit JWTs. LiveKit Cloud acts as the WebRTC Selective Forwarding Unit (SFU) and provides BVC noise cancellation.
-3. **Agent Worker Node**: Core orchestration layer. Uses Silero VAD for accurate endpointing, Sarvam STT for speech-to-text and language detection, Groq LLM for low-latency contextual responses, and Sarvam TTS with 11 pre-warmed websocket instances for instantaneous text-to-speech.
-4. **External Services**: Langfuse captures hierarchical telemetry (e.g., user turns, TTS time-to-first-byte, LLM time-to-first-token, interruptions) for performance monitoring.
+1. **Client Side**: React 19 + TypeScript + Vite SPA using `@livekit/components-react`. Fetches a token via `TokenSource.endpoint('/token')` and connects to LiveKit Cloud. Renders audio visualizer, chat transcript, and language chips from data channel messages.
+2. **Backend Infrastructure**: FastAPI Token Server issues secure LiveKit JWTs (GET + POST endpoints). Serves built frontend as SPA with fallback routing. LiveKit Cloud acts as the WebRTC SFU and provides BVC noise cancellation.
+3. **Agent Worker Node**: Core orchestration layer. Silero VAD for endpointing, Sarvam STT for speech-to-text and language detection, configurable LLM for responses, and Sarvam TTS with persistent per-language WebSocket pools. Includes filler suppression, transcript deduplication, language hysteresis, and rolling conversation summarization.
+4. **External Services**: Langfuse captures hierarchical telemetry — session traces, per-turn spans, STT/LLM/TTS observability (TTFT, TTFB), tool call latency, language switch events, and interruption tracking.
 
 ### Latency budget
 
 | Stage | Time |
 |---|---|
-| Browser → LiveKit | 20-40ms |
+| Browser to LiveKit | 20-40ms |
 | Sarvam STT | ~70ms |
-| Endpointing delay | 70ms |
-| Groq LLM (Llama-3) | **150-250ms** |
+| Endpointing delay | 50-150ms |
+| LLM first token | 150-400ms (varies by provider) |
 | Sarvam TTS (first byte) | 100-200ms |
-| LiveKit → Browser | 20-40ms |
-| **Total** | **~430-670ms** |
+| LiveKit to Browser | 20-40ms |
+| **Total** | **~400-860ms** |
 
 ## Quick start
 
 ### Prerequisites
 
 - Python 3.10+
+- Node.js 20+
 - [LiveKit Cloud](https://cloud.livekit.io) account (free)
 - [Sarvam AI](https://dashboard.sarvam.ai) API key
-- [Groq](https://console.groq.com) API key (free, for Llama-3 LLM)
-- [Langfuse](https://langfuse.com) API key (free, for observability)
+- [Langfuse](https://langfuse.com) account (optional, free tier for observability)
 
 ### Setup
 
 ```bash
 cd Voice-AI-Agent
 
-# Install dependencies
+# Install Python dependencies
 uv sync
+
+# Install frontend dependencies
+cd frontend && npm install && cd ..
 
 # Configure API keys
 cp .env.example .env
@@ -107,13 +110,13 @@ cp .env.example .env
 Three terminals needed:
 
 ```bash
-# Terminal 1 — Token server (port 8000)
+# Terminal 1 — Token server + API (port 8000)
 uv run python server.py
 
 # Terminal 2 — Agent worker
 uv run python agent.py dev
 
-# Terminal 3 — Serve frontend (port 3000)
+# Terminal 3 — Frontend dev server (port 3000, proxies /token to :8000)
 cd frontend && npm run dev
 ```
 
@@ -125,105 +128,142 @@ Open `http://localhost:3000` and click **Connect**. The agent greets you in Hind
 uv run python agent.py console
 ```
 
+### Docker / Hugging Face Spaces
+
+The included `Dockerfile` builds a self-contained image for HF Spaces deployment:
+
+```bash
+docker build -t voice-ai-agent .
+docker run -p 7860:7860 --env-file .env voice-ai-agent
+```
+
+Runs both the agent worker and token server on port 7860, serving the built frontend as a SPA.
+
 ## Supported languages
 
 | Language | Code | Speaker | Region |
 |---|---|---|---|
-| Hindi | `hi-IN` | simran | North |
-| Tamil | `ta-IN` | kavitha | South |
-| Telugu | `te-IN` | rupali | South |
-| Kannada | `kn-IN` | neha | South |
-| Malayalam | `ml-IN` | priya | South |
-| Marathi | `mr-IN` | shreya | West |
-| Gujarati | `gu-IN` | pooja | West |
-| Bengali | `bn-IN` | ishita | East |
-| Odia | `od-IN` | suhani | East |
-| Punjabi | `pa-IN` | tanya | North |
-| English | `en-IN` | aditya | Pan-India |
+| Hindi | `hi-IN` | shubh | North |
+| Tamil | `ta-IN` | shubh | South |
+| Telugu | `te-IN` | shubh | South |
+| Kannada | `kn-IN` | shubh | South |
+| Malayalam | `ml-IN` | shubh | South |
+| Marathi | `mr-IN` | shubh | West |
+| Gujarati | `gu-IN` | shubh | West |
+| Bengali | `bn-IN` | shubh | East |
+| Odia | `od-IN` | shubh | East |
+| Punjabi | `pa-IN` | shubh | North |
+| English | `en-IN` | shubh | Pan-India |
+
+All languages use the `shubh` speaker from Sarvam Bulbul v3.
 
 ## How language auto-detection works
 
 1. Sarvam STT runs with `language="unknown"` — it auto-detects the spoken language
 2. `user_input_transcribed` event stores the detected language code
-3. `on_user_turn_completed(turn_ctx, *, new_message=None)` reads the stored language and switches TTS if needed
-4. `MultilingualTTS.current_language` is updated — the TTS wrapper routes to the correct per-language Sarvam instance
-5. Each language has its own pre-initialized TTS instance with the right voice — no WebSocket reconnect latency on switch
-6. Transcripts are published to the frontend via LiveKit data channel for real-time chat display
+3. `FillerFilter` drops filler utterances ("hmm", "uh", "ji") — no LLM/TTS triggered
+4. `TranscriptDedup` prevents repeated STT finals from duplicate processing
+5. `LanguageTracker` applies **real hysteresis**: requires 3 consecutive meaningful turns (>=15 chars) in the same new language before switching TTS
+6. Until hysteresis confirms: current TTS websocket stays warm — no teardown
+7. Single-turn language mismatches: respond in detected language but keep old TTS instance alive
+8. Transcripts are published to the frontend via LiveKit data channel for real-time chat display
+
+## LLM Providers
+
+The agent supports three LLM providers, selected via the `LLM_PROVIDER` environment variable:
+
+| Provider | Model | Setup |
+|---|---|---|
+| `sarvam` (default) | `sarvam-30b` | Just needs `SARVAM_API_KEY` |
+| `openai` | `gpt-4o-mini` | Set `OPENAI_API_KEY` |
+| `groq` | `llama-3.3-70b-versatile` | Set `GROQ_API_KEY` |
 
 ## Frontend
 
-React + Vite SPA — `livekit-client` installed via npm. ESM CDN no longer required.
+React 19 + TypeScript + Vite 8 SPA. Uses Tailwind CSS v4, shadcn/ui (Radix UI primitives), and `@livekit/components-react`.
 
-- **Animated orb** — reflects agent state: blue pulse when listening, violet spin when thinking, green glow when speaking
-- **Chat transcript** — bubble-style conversation with user (blue) and agent (dark) messages, auto-scroll, fed by agent data messages
+- **Audio visualizer** — animated bar visualizer synced to agent state (connecting/listening/thinking/speaking)
+- **Chat transcript** — bubble-style conversation with user and agent messages, auto-scroll, streaming markdown rendering
 - **Language chips** — all 11 languages shown; detected language highlights in green
-- **Error banner** — intelligent diagnostics: distinguishes token server unreachable vs LiveKit connection failed
-- **Mute toggle** — round mic button that calls `setMicrophoneEnabled()` on the LiveKit participant
-- **Dynamic hostname** — token URL uses `window.location.hostname` so it works via `localhost` or `0.0.0.0`
+- **Control bar** — microphone toggle, leave room button
+- **Start audio button** — browser autoplay unlock prompt
+
+### Build
 
 ```bash
 cd frontend
-npm install
-npm run dev     # starts on http://localhost:3000
+npm run dev     # development on http://localhost:3000
+npm run build   # production build to frontend/dist/
+npm run lint    # ESLint
 ```
 
-For production:
-
-```bash
-cd frontend
-npm run build   # outputs to frontend/dist/
-```
+The Vite dev server proxies `/token` to `http://localhost:8000` so no CORS issues in development. In production, `server.py` serves the built frontend from `frontend/dist/` with SPA fallback routing.
 
 ## Project structure
 
 ```
 Voice-AI-Agent/
-├── agent.py              # MultilingualTTS + SchoolVoiceAgent + entrypoint
-├── server.py             # FastAPI token server (/token endpoint)
-├── config.py             # Language config, voice mappings, STT/TTS constants
-├── pyproject.toml        # Dependencies (uv)
+├── agent.py              # WSState, FillerFilter, LanguageTracker, TranscriptDedup,
+│                         #   TTSSessionManager, RaceFreeSynthesizeStream,
+│                         #   MultilingualTTS, SchoolVoiceAgent, entrypoint
+├── server.py             # FastAPI: GET/POST /token + SPA static file serving
+├── config.py             # LanguageConfig, 11 languages, all constants
+├── pyproject.toml        # Python dependencies (uv)
+├── Dockerfile            # Multi-stage build for HF Spaces
 ├── .env.example          # API keys template
 ├── CLAUDE.md             # Claude Code agent context
 ├── utils/
-│   ├── prompts.py        # System prompt (multilingual, emotional intelligence)
-│   └── tools.py          # School tools (homework, attendance, timetable, etc.)
-├── frontend/
-│   ├── src/
-│   │   ├── App.jsx                 # Root component, wires all pieces
-│   │   ├── App.css                 # Global styles, CSS custom properties, animations
-│   │   ├── main.jsx                # React entry point
-│   │   ├── components/
-│   │   │   ├── Orb.jsx / Orb.css   # Animated orb — idle/listening/thinking/speaking
-│   │   │   ├── StatusLabel.jsx     # "Listening...", "Thinking...", "Speaking..."
-│   │   │   ├── LanguageBar.jsx     # 11 language chips with active highlight
-│   │   │   ├── ChatTranscript.jsx  # Scrollable bubble-style conversation
-│   │   │   ├── ErrorBanner.jsx     # Diagnostic error messages
-│   │   │   └── Controls.jsx        # Connect / Leave Room / Mute toggle
-│   │   └── hooks/
-│   │       └── useVoiceAgent.js    # LiveKit connection, state machine, data channel
-│   ├── index.html                  # Vite HTML entry
-│   ├── package.json
-│   └── vite.config.js
-└── README.md
+│   ├── prompts.py        # System prompt (voice-optimised, ~2000 chars)
+│   ├── tools.py          # School tools with Langfuse tracing
+│   └── summarize.py      # Rolling conversation summarization
+└── frontend/
+    ├── src/
+    │   ├── App.tsx                          # Root — AgentSessionProvider + AgentUI
+    │   ├── main.tsx                         # React 19 entrypoint
+    │   ├── index.css                        # Tailwind CSS v4 import
+    │   ├── hooks/
+    │   │   ├── useTranscripts.ts            # LiveKit data channel listener
+    │   │   └── agents-ui/                   # Audio visualizer + control bar hooks
+    │   ├── components/
+    │   │   ├── LanguageBar.tsx              # 11 language chips
+    │   │   ├── agents-ui/                   # LiveKit agent UI components
+    │   │   │   ├── agent-session-provider.tsx
+    │   │   │   ├── agent-control-bar.tsx
+    │   │   │   ├── agent-chat-transcript.tsx
+    │   │   │   ├── agent-audio-visualizer-bar.tsx
+    │   │   │   └── start-audio-button.tsx
+    │   │   ├── ai-elements/                 # AI conversation/message primitives
+    │   │   └── ui/                          # shadcn/ui base components
+    │   └── lib/
+    │       └── utils.ts                     # cn() utility (clsx + tailwind-merge)
+    ├── package.json
+    ├── vite.config.js
+    ├── tsconfig.json
+    ├── components.json                      # shadcn/ui config
+    └── index.html
 ```
 
 ## Key optimizations
 
-- **Silero VAD** — dedicated voice activity detection following LiveKit's recommended pattern for reliable turn detection
-- **70ms endpointing** — `EndpointingOptions(min_delay=0.07)` via `TurnHandlingOptions` vs typical 200-300ms
-- **TTS connection pooling** — one WebSocket per language, pre-warmed synchronously, no reconnect on language switch
+- **Silero VAD** — dedicated voice activity detection following LiveKit's recommended pattern
+- **Dynamic endpointing** — `min_delay=50ms`, `max_delay=150ms`, `alpha=0.6` — aggressive tuning for fast Indian-language turn-taking
+- **Preemptive TTS** — starts synthesis as soon as LLM produces first tokens, reducing time-to-first-audio
+- **TTS connection pooling** — one persistent WebSocket per language, never closed between turns, no reconnect on language switch
+- **Filler suppression** — 27 filler patterns filtered out before LLM/TTS pipeline activation
+- **Transcript deduplication** — MD5 hashing + time window prevents repeated STT finals from duplicate processing
+- **Language hysteresis** — 3 consecutive meaningful turns required before switching TTS, eliminates flip-flopping
+- **Two-layer context** — rolling summarization of older turns + sliding window of recent turns for long conversations
 - **BVC noise cancellation** — LiveKit server-side removes keyboard, fan, background voices
-- **50ms barge-in** — `min_speech_duration=0.05` enables instant interruption when user starts speaking
-- **Groq LLM Backend** — Llama-3 evaluates tools and streams first token in under 200ms, completely eliminating OpenAI tool-calling overhead
-- **Langfuse Observability** — OpenTelemetry-based hierarchical tracing of conversation turns, LLM TTFT, TTS TTFB, and tool latency
-- **Noisy environment fallback** — `config.py` has commented-out overrides (300ms/150ms) when background noise is present
-- **React + Vite** — componentized frontend with `livekit-client` as npm dependency, fast HMR in dev
+- **200ms barge-in** — `min_duration=0.2` enables natural interruption with backchannel boundary suppression
+- **Langfuse observability** — hierarchical tracing: session, turns, STT, LLM (TTFT), TTS (TTFB), tool calls, language switches, interruptions
+- **Multi-provider LLM** — switch between Sarvam, OpenAI, and Groq via environment variable
+- **Noisy environment fallback** — `config.py` has commented-out overrides for background-noise-heavy settings
 
 ## Design notes
 
 - Sarvam TTS has **no SSML/emotion tags** — emotion is conveyed through word choice and Indian interjections in the system prompt
-- Each language gets its own `sarvam.TTS` instance (not a single instance with `update_options()`) — avoids WebSocket reconnect overhead
-- Turn detection uses `TurnHandlingOptions(endpointing=EndpointingOptions(min_delay=0.07))` — the new non-deprecated API replacing `min_endpointing_delay`
-- For noisy environments like crowded classrooms, swap `config.py` to the commented-out noisy values
-- Tools are stubs returning mock data — replace with real school database/SIS integrations
-# Voice-AI-Agent
+- Each language gets its own persistent `sarvam.TTS` instance managed by `TTSSessionManager` — no scattered `ws.close()` calls
+- `RaceFreeSynthesizeStream` wraps Sarvam's stream with a `WSState` state machine and drain-before-close to prevent aiohttp transport crashes
+- Turn detection uses `TurnHandlingOptions(endpointing=EndpointingOptions(...))` — the non-deprecated API with preemptive generation enabled
+- Tools are currently commented out — uncomment in `SchoolVoiceAgent.__init__()` and replace stubs with real school database integrations
+- For noisy environments like crowded classrooms, swap `config.py` to the commented-out noisy values (300ms/600ms endpointing)
