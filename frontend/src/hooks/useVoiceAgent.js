@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react';
 import { Room, RoomEvent, RoomConnectOptions } from 'livekit-client';
 
-const TOKEN_URL = `http://${window.location.hostname}:8000/token`;
+const TOKEN_URL = '/token';
 const ROOM_NAME = 'school-voice-room';
 
 export default function useVoiceAgent() {

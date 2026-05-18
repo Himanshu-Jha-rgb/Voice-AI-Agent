@@ -6,34 +6,66 @@ Built on [LiveKit Agents](https://github.com/livekit/agents) + [Sarvam AI](https
 
 ## Architecture
 
+```mermaid
+graph TD
+    %% Define Styles
+    classDef frontend fill:#3b82f6,stroke:#1e3a8a,stroke-width:2px,color:white;
+    classDef server fill:#10b981,stroke:#047857,stroke-width:2px,color:white;
+    classDef livekit fill:#f59e0b,stroke:#b45309,stroke-width:2px,color:white;
+    classDef agent fill:#8b5cf6,stroke:#4c1d95,stroke-width:2px,color:white;
+    classDef ext fill:#64748b,stroke:#334155,stroke-width:2px,color:white;
+    
+    subgraph Client [Client Side]
+        UI[React/Vite Frontend]:::frontend
+    end
+    
+    subgraph Backend [Backend Infrastructure]
+        TokenServer[FastAPI Token Server]:::server
+        LiveKitCloud[LiveKit Cloud / WebRTC Router]:::livekit
+    end
+    
+    subgraph Worker [Agent Worker Node]
+        VoiceAgent[LiveKit Python Agent]:::agent
+        
+        subgraph Pipeline [Voice Processing Pipeline]
+            VAD[Silero VAD: Turn Detection]:::agent
+            STT[Sarvam STT: Speech-to-Text & Lang Detect]:::agent
+            LLM[Groq / Llama-3 / OpenAI: LLM Generation]:::agent
+            TTS[Sarvam TTS: Multi-lang Streaming]:::agent
+            Tools[School Operations Tools]:::agent
+        end
+    end
+    
+    subgraph Externals [External Services]
+        Langfuse[Langfuse: Observability & Tracing]:::ext
+    end
+
+    %% Connections
+    UI -- "1. Request Token (/token)" --> TokenServer
+    TokenServer -- "2. Return LiveKit JWT" --> UI
+    
+    UI <== "3. WebRTC (Audio In/Out)\nData Channel (Transcripts)" ==> LiveKitCloud
+    LiveKitCloud <== "4. WebRTC\nData Channel" ==> VoiceAgent
+    
+    %% Pipeline Flow
+    VoiceAgent --> |Audio stream| VAD
+    VAD --> |Speech endpoints| STT
+    STT --> |Transcript + Language| LLM
+    LLM --> |Tool Call| Tools
+    Tools -.-> |Tool Result| LLM
+    LLM --> |Text chunks| TTS
+    TTS --> |Synthesized Audio| VoiceAgent
+    
+    %% External Integrations
+    VoiceAgent -. "Traces & Spans\n(TTFT, TTFB, latency)" .-> Langfuse
 ```
-Browser ──WebRTC──▶ LiveKit Cloud (BVC noise cancellation)
-                        │
-     ┌──────────────────▼─────────────────────┐       ┌────────────────────┐
-     │            Voice AI Agent               │       │                    │
-     │                                         │       │  Langfuse v4       │
-     │  Silero VAD (turn detection)            │       │   - LLM TTFT       │
-     │    reliable speech start/end detection  │──────▶│   - TTS TTFB       │
-     │                                         │       │   - Tool tracing   │
-     │  Sarvam STT (Saaras v3)                 │       │   - Latency logs   │
-     │    language="unknown" → auto-detect     │       │                    │
-     │    flush_signal for secondary VAD       │       └────────────────────┘
-     │                                         │
-     │  Language detection                     │
-     │    stores language from STT event       │
-     │    routes to correct TTS voice          │
-     │                                         │
-     │  LLM (Groq Llama-3 or Sarvam-30b)       │
-     │    multilingual responses               │
-     │    text-based emotional expression      │
-     │    tool calling (homework, attendance)  │
-     │                                         │
-     │  MultilingualTTS (Sarvam Bulbul v3)     │
-     │    11 TTS instances, 1 per language     │
-     │    WebSocket streaming, 24000 Hz        │
-     │    ──Data channel──▶ Frontend chat      │
-     └─────────────────────────────────────────┘
-```
+
+### Component Breakdown
+
+1. **Client Side**: Uses `livekit-client` via React/Vite. Fetches a token from the Token Server and connects to LiveKit Cloud. Renders the UI using data channel messages from the Agent.
+2. **Backend Infrastructure**: FastAPI Token Server issues secure LiveKit JWTs. LiveKit Cloud acts as the WebRTC Selective Forwarding Unit (SFU) and provides BVC noise cancellation.
+3. **Agent Worker Node**: Core orchestration layer. Uses Silero VAD for accurate endpointing, Sarvam STT for speech-to-text and language detection, Groq LLM for low-latency contextual responses, and Sarvam TTS with 11 pre-warmed websocket instances for instantaneous text-to-speech.
+4. **External Services**: Langfuse captures hierarchical telemetry (e.g., user turns, TTS time-to-first-byte, LLM time-to-first-token, interruptions) for performance monitoring.
 
 ### Latency budget
 
