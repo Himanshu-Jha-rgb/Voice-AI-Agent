@@ -386,9 +386,25 @@ class TTSSessionManager:
 
     # ── stream / synthesize — the interface used by LiveKit Agent ────────────
 
+    def _evict_stale(self, tts_instance: sarvam.TTS) -> None:
+        """Remove closed connections from the pool before synthesis.
+
+        After idle periods (e.g. 2 min between turns), Sarvam's ConnectionPool
+        may hold stale websocket connections.  Evicting them before synthesis
+        prevents 3s+ TTFB spikes from timeout-retry cycles.
+        """
+        pool = tts_instance._pool
+        stale = {c for c in list(pool._connections) if getattr(c, "closed", True)}
+        for c in stale:
+            pool.remove(c)
+        if stale:
+            logger.debug(f"Evicted {len(stale)} stale TTS connections")
+            pool.prewarm()
+
     def synthesize(self, text: str) -> tts.ChunkedStream:
         """Non-streaming synthesis (HTTP POST, no websocket race concern)."""
         tts_instance = self._get_or_create_tts(self._current_language)
+        self._evict_stale(tts_instance)
         return tts_instance.synthesize(text=text)
 
     def stream(self) -> "RaceFreeSynthesizeStream":
@@ -399,6 +415,7 @@ class TTSSessionManager:
         ConnectionPool for reuse on the next turn.
         """
         tts_instance = self._get_or_create_tts(self._current_language)
+        self._evict_stale(tts_instance)
         delegate = tts_instance.stream()
         wrapped = RaceFreeSynthesizeStream(
             delegate=delegate,
@@ -774,20 +791,19 @@ class SchoolVoiceAgent(Agent):
             f"transcript: {transcript[:60]!r} ({transcript_length} chars)"
         )
 
-        # ── Step 1: Filler suppression ──────────────────────────────────────
-        # Drop filler utterances entirely: no LLM generation, no TTS, no
-        # state transition, no language detection recording.
-        if FillerFilter.is_filler(transcript):
-            logger.info(
-                f"Filler suppressed: {transcript!r} "
-                f"({transcript_length} chars) — skipping LLM/TTS"
+        # ── Step 1: Filler check (for language tracking only) ────────────────
+        # Fillers still go to LLM/TTS — the agent can respond naturally.
+        # But fillers must NOT influence language detection, otherwise a
+        # stray "hmm" gets recorded as Bengali and triggers a language switch.
+        is_filler = FillerFilter.is_filler(transcript)
+        lang_for_tracker = None if is_filler else _detected_language
+        if is_filler:
+            logger.debug(
+                f"Filler detected: {transcript!r} — skipping language tracking"
             )
-            _detected_language = None
-            _detected_transcript = ""
-            return
 
         # ── Step 2: Record turn in hysteresis tracker ───────────────────────
-        self._lang_tracker.record_turn(_detected_language, transcript_length)
+        self._lang_tracker.record_turn(lang_for_tracker, transcript_length)
 
         # ── Step 3: Decide language — real hysteresis only ──────────────────
         target_language = self._tts_session.current_language

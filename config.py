@@ -83,16 +83,24 @@ BACKCHANNEL_BOUNDARY_END = (
 # Requires the same language across N consecutive *meaningful* turns before
 # switching TTS websocket.  Short/filler transcripts are completely ignored.
 LANG_SWITCH_MIN_CHARS = (
-    15  # ignore language switch if transcript < 15 characters (was 5)
+    25  # ignore language switch if transcript < 25 characters (was 5)
 )
 LANG_SWITCH_MIN_CONFIDENCE = 0.8  # reserved for future STT confidence field
 LANG_SWITCH_CONSECUTIVE = 3  # require same language for 3 consecutive turns (was 2)
 
-# ── Filler suppression ────────────────────────────────────────────────────────
-# Utterances matching these patterns or shorter than FILLER_MIN_LENGTH are
-# dropped entirely — no LLM generation, no TTS, no state transition.
-FILLER_MIN_LENGTH = 4  # transcript shorter than this is always suppressed
+# ── Filler detection (for language tracking only) ─────────────────────────────
+# These patterns are NOT used to suppress responses — the LLM always sees
+# and responds to everything the user says.
+#
+# They ARE used to prevent filler sounds ("hmm", "achha achha") from
+# influencing language detection.  Without this, a stray "hmm" could be
+# detected as Bengali and trigger an unwanted language switch.
+#
+# Only include pure thinking/sound-fillers.  Words like "haan" (yes),
+# "nahi" (no), "ji" (yes) can be legitimate answers — do NOT include them.
+FILLER_MIN_LENGTH = 4  # transcript shorter than this is treated as filler
 FILLER_PATTERNS: set[str] = {
+    # English — thinking sounds only
     "hmm",
     "umm",
     "uh",
@@ -100,29 +108,50 @@ FILLER_PATTERNS: set[str] = {
     "eh",
     "oh",
     "er",
-    "haan",
-    "hmm hmm",
-    "umm hmm",
-    "okay",
-    "ok",
-    "hmm okay",
-    "okay okay",
-    "achha",
-    "acha",
-    "theek",
-    "theek hai",
-    "haan ji",
-    "ji haan",
-    "ji",
-    "nahi",
-    "nahin",
-    "na",
-    "kya",
-    "kyaa",
     "huh",
     "huh?",
     "what?",
     "what",
+    "but also",
+    "so",
+    "well",
+    "like",
+    "yeah",
+    "yep",
+    "nope",
+    # Hindi — thinking sounds only (NOT "haan", "nahi", "ji" — those are answers)
+    "hmm hmm",
+    "umm hmm",
+    "achha achha",
+    "acha acha",
+    "theek hai",
+    "haan ji",
+    "ji haan",
+    "arre",
+    "chal",
+    "chalo",
+    "haan haan",
+    "nahi nahi",
+    # Bengali — thinking sounds only (NOT "হ্যাঁ", "না" — those are answers)
+    "হুম",
+    "হুম হুম",
+    "আচ্ছা",
+    "হুহুম",
+    # Gujarati — thinking sounds only (NOT "હા", "ના" — those are answers)
+    "સારું",
+    "અચ્છા",
+    # Tamil — thinking sounds only (NOT "ஆமா", "இல்ல" — those are answers)
+    "சரி",
+    "அப்படியா",
+    # Telugu — thinking sounds only (NOT "అవును", "కాదు" — those are answers)
+    "సరే",
+    "అంతే",
+    # Marathi — thinking sounds only (NOT "हो", "नाही" — those are answers)
+    "ठीक आहे",
+    # Kannada — thinking sounds only (NOT "ಹೌದು", "ಇಲ್ಲ" — those are answers)
+    "ಸರಿ",
+    # Malayalam — thinking sounds only (NOT "അതെ", "ഇല്ല" — those are answers)
+    "ശരി",
 }
 
 # ── Transcript deduplication ─────────────────────────────────────────────────
