@@ -673,15 +673,6 @@ class MultilingualTTS(tts.TTS):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Per-session state (set from STT events, consumed at turn completion)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_detected_language: Optional[str] = None
-_detected_transcript: str = ""
-_transcript_dedup = TranscriptDedup(DEDUP_WINDOW_SECONDS, DEDUP_MAX_HISTORY)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # SchoolVoiceAgent
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -693,6 +684,15 @@ class SchoolVoiceAgent(Agent):
 
         self._rolling_summary: Optional[str] = None
         self._summary_in_progress: bool = False
+
+        self._session_trace_id: Optional[str] = None
+        self._root_span_id: Optional[str] = None
+        self._active_turn_span_id: Optional[str] = None
+
+        # Per-turn state (was module-level — moved here for concurrent session safety)
+        self._detected_language: Optional[str] = None
+        self._detected_transcript: str = ""
+        self._transcript_dedup = TranscriptDedup(DEDUP_WINDOW_SECONDS, DEDUP_MAX_HISTORY)
 
         # Language-hysteresis tracker with REAL thresholds
         self._lang_tracker = LanguageTracker(
@@ -757,7 +757,9 @@ class SchoolVoiceAgent(Agent):
         HOT_LANGUAGES = ["hi-IN", "en-IN"]
         for lang in HOT_LANGUAGES:
             self._tts_session._get_or_create_tts(lang)
-            await self._tts_session.warm(lang)
+        await self._tts_session.warm("hi-IN")
+        # en-IN warmup is a background task — don't block the greeting on it
+        self.track_bg(self._tts_session.warm("en-IN"))
         self.session.generate_reply(instructions=GREETING_INSTRUCTIONS)
 
     async def on_exit(self) -> None:
@@ -774,8 +776,6 @@ class SchoolVoiceAgent(Agent):
         await self._tts_session.aclose()
 
     async def on_user_turn_completed(self, turn_ctx, *, new_message=None) -> None:
-        global _detected_language, _detected_transcript
-        
         turn_span = langfuse_client.start_observation(
             name="user-turn",
             trace_context={"trace_id": self._session_trace_id, "parent_span_id": getattr(self, "_root_span_id", None)}
@@ -783,11 +783,11 @@ class SchoolVoiceAgent(Agent):
         self._active_turn_span_id = turn_span.id
         active_turn_span_var.set({"trace_id": self._session_trace_id, "span_id": turn_span.id})
 
-        transcript = _detected_transcript or ""
+        transcript = self._detected_transcript or ""
         transcript_length = len(transcript)
 
         logger.info(
-            f"Turn completed — detected language: {_detected_language}, "
+            f"Turn completed — detected language: {self._detected_language}, "
             f"transcript: {transcript[:60]!r} ({transcript_length} chars)"
         )
 
@@ -796,7 +796,7 @@ class SchoolVoiceAgent(Agent):
         # But fillers must NOT influence language detection, otherwise a
         # stray "hmm" gets recorded as Bengali and triggers a language switch.
         is_filler = FillerFilter.is_filler(transcript)
-        lang_for_tracker = None if is_filler else _detected_language
+        lang_for_tracker = None if is_filler else self._detected_language
         if is_filler:
             logger.debug(
                 f"Filler detected: {transcript!r} — skipping language tracking"
@@ -830,17 +830,17 @@ class SchoolVoiceAgent(Agent):
             )
             target_language = switch_to
         elif (
-            _detected_language
-            and _detected_language in LANGUAGE_CODE_MAP
+            self._detected_language
+            and self._detected_language in LANGUAGE_CODE_MAP
             and transcript_length >= LANG_SWITCH_MIN_CHARS
-            and _detected_language != self._tts_session.current_language
+            and self._detected_language != self._tts_session.current_language
         ):
             langfuse_client.create_event(
                 name="language-switch",
                 trace_context={"trace_id": self._session_trace_id, "parent_span_id": self._active_turn_span_id},
                 metadata={
                     "from": target_language,
-                    "to": _detected_language,
+                    "to": self._detected_language,
                     "temporary": True,
                     "hysteresis_confirmed": False,
                 }
@@ -849,24 +849,24 @@ class SchoolVoiceAgent(Agent):
             # current TTS instance warm.  If user switches back next turn,
             # the old websocket is still alive — no reconnect penalty.
             logger.info(
-                f"Temporary language: using {_detected_language} for this "
+                f"Temporary language: using {self._detected_language} for this "
                 f"response (transcript: {transcript_length} chars). "
                 f"Current TTS ({target_language}) kept warm — no websocket teardown."
             )
-            target_language = _detected_language
+            target_language = self._detected_language
         # else: keep current language (filler already suppressed above)
 
         self._tts_session.current_language = target_language
         
         turn_span.update(metadata={
-            "detected_language": _detected_language,
+            "detected_language": self._detected_language,
             "transcript_length": transcript_length,
             "final_tts_language": target_language,
         })
 
-        # ── Step 4: Reset per-turn globals ──────────────────────────────────
-        _detected_language = None
-        _detected_transcript = ""
+        # ── Step 4: Reset per-turn state ──────────────────────────────────
+        self._detected_language = None
+        self._detected_transcript = ""
 
         # ── Step 5: Two-layer chat context assembly ─────────────────────────
         items = self._chat_ctx.items
@@ -938,7 +938,7 @@ class SchoolVoiceAgent(Agent):
             generation = langfuse_client.start_observation(
                 as_type="generation",
                 name="llm-generation",
-                model=OPENAI_MODEL if LLM_PROVIDER == "openai" else LLM_MODEL,
+                model=OPENAI_MODEL if LLM_PROVIDER == "openai" else (GROQ_MODEL if LLM_PROVIDER == "groq" else LLM_MODEL),
                 input=inp,
                 trace_context={"trace_id": self._session_trace_id, "parent_span_id": self._active_turn_span_id}
             )
@@ -1058,7 +1058,6 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("user_input_transcribed")
     def _on_stt(ev):
-        global _detected_language, _detected_transcript
         transcript = getattr(ev, "transcript", "")
         language = getattr(ev, "language", None)
         is_final = getattr(ev, "is_final", False)
@@ -1084,19 +1083,19 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.debug(f"STT final — '{transcript[:50]}' lang={language}")
 
         # First language detection for this turn wins
-        if language and _detected_language is None:
-            _detected_language = language
+        if language and agent._detected_language is None:
+            agent._detected_language = language
 
         if transcript and is_final:
             # Deduplicate: ignore repeated finals within the time window
-            if _transcript_dedup.is_duplicate(transcript):
+            if agent._transcript_dedup.is_duplicate(transcript):
                 logger.debug(
                     f"Duplicate final transcript dropped: '{transcript[:40]}'"
                 )
                 return
 
-            _detected_transcript = (
-                _detected_transcript + " " + transcript
+            agent._detected_transcript = (
+                agent._detected_transcript + " " + transcript
             ).strip()
 
             agent.track_bg(
