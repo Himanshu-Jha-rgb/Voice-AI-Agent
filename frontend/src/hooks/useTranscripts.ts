@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { RoomEvent } from 'livekit-client';
-import { useRoomContext, type ReceivedMessage } from '@livekit/components-react';
+import { useRoomContext } from '@livekit/components-react';
 
 export interface TranscriptMessage {
   id: string;
