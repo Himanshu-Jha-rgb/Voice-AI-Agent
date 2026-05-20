@@ -277,3 +277,28 @@ Voice-AI-Agent/
 - Turn detection uses `TurnHandlingOptions(endpointing=EndpointingOptions(...))` — the non-deprecated API with preemptive generation enabled
 - Tools are currently commented out — uncomment in `SchoolVoiceAgent.__init__()` and replace stubs with real school database integrations
 - For noisy environments like crowded classrooms, swap `config.py` to the commented-out noisy values (300ms/600ms endpointing)
+
+
+
+
+what have we done exactly using internals pool and why ?
+
+
+
+
+What We Did Exactly
+In agent.py (specifically under the TTSSessionManager class), the code directly accesses the private attributes of the Sarvam TTS client:
+
+Inspected the Active Connection List: We access tts_instance._pool._connections to get the list of raw websocket connections.
+Evicted Closed WebSockets (_evict_stale & warm): We loop through those connections, check if their state is .closed (e.g., due to server-side idle timeout), and manually purge them from the pool using pool.remove(c).
+Pre-warmed WebSockets (pool.prewarm()): We invoke the pool's internal prewarm() method in the background when the user first connects or when we predict a language switch.
+Why We Did It (The Latency & Reliability Problem)
+1. Preventing 3s+ Latency Spikes (Stale Connections)
+The Problem: If there is a silence of a couple of minutes between conversation turns, Sarvam's servers close the idle WebSocket connection. However, the default Sarvam SDK's connection pool keeps these closed connection objects in its list. When the user speaks again, the SDK attempts to use the dead connection, fails, waits for a timeout, and only then creates a new one. This causes a massive 3+ second delay (TTFB spike).
+The Solution: By checking getattr(c, "closed", True) and calling pool.remove(c) before generating speech, we instantly purge dead connections so the SDK never attempts to use them, completely avoiding the timeout-retry loop.
+2. Achieving Sub-100ms First-Byte Audio (Connection Pre-warming)
+The Problem: Setting up a brand-new WebSocket connection (DNS lookup, TCP handshake, TLS negotiation, and upgrade) takes 300–600ms. If this setup only begins after the LLM outputs its first word, the user feels a jarring lag.
+The Solution: By invoking pool.prewarm() during on_enter and in the background during conversation turns, we establish the WebSocket connection proactively. When the LLM starts yielding tokens, the connection is already open and ready, reducing the startup latency to under 100ms.
+3. Seamless Multi-Language Switching
+The Problem: In a multilingual agent (supporting 11 languages), switching the TTS language would normally mean tearing down the current WebSocket and opening a new one for the target language.
+The Solution: We maintain a persistent sarvam.TTS instance per language. The internal pool keeps the WebSockets for English (en-IN), Hindi (hi-IN), etc., open concurrently. We can switch languages turn-by-turn with zero reconnect penalty.

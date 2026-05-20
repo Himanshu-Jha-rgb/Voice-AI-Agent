@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Multilingual Voice AI Agent for Indian Schools — powered by Sarvam AI + LiveKit"
 requires-python = ">=3.10"
 dependencies = [
-    "livekit-agents[sarvam,silero]>=1.5",
+    "livekit-agents[sarvam,silero]==1.5.8",
+    "livekit-plugins-sarvam==1.5.8",
+    "livekit-plugins-silero==1.5.8",
     "livekit",
     "fastapi",
     "uvicorn[standard]",
